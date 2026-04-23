@@ -6,7 +6,12 @@ import psutil
 import requests
 import streamlit as st
 import trafilatura
+import spacy
+import pytextrank
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 from sumy.parsers.plaintext import PlaintextParser
+from nltk.tokenize import sent_tokenize
 from sumy.nlp.tokenizers import Tokenizer
 from sumy.summarizers.lsa import LsaSummarizer
 from sumy.summarizers.luhn import LuhnSummarizer
@@ -62,7 +67,52 @@ NOISE_PATTERNS = re.compile(
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH    = os.path.join(BASE_DIR, "local-models", "bart-large-cnn")
 T5_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "t5-small")
+ST_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "all-MiniLM-L6-v2")
+SPACY_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "en_core_web_sm")
 
+
+@st.cache_resource
+def load_sentence_transformer():
+    """Load sentence transformer from local folder, download if not present"""
+    if not os.path.exists(ST_MODEL_PATH):
+        print("Sentence Transformer not found locally, downloading...")
+        os.makedirs(ST_MODEL_PATH, exist_ok=True)
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        model.save(ST_MODEL_PATH)
+        print("Sentence Transformer saved!")
+    else:
+        print("Sentence Transformer found locally, loading...")
+
+    return SentenceTransformer(ST_MODEL_PATH)
+
+
+
+@st.cache_resource
+def load_spacy():
+    if not os.path.exists(SPACY_MODEL_PATH):
+        print("spaCy model not found locally, downloading...")
+        os.makedirs(SPACY_MODEL_PATH, exist_ok=True)
+
+        spacy.cli.download("en_core_web_sm")
+
+        import en_core_web_sm
+        import shutil
+
+        source_path = os.path.join(
+            en_core_web_sm.__path__[0],
+            "en_core_web_sm-3.8.0"        
+        )
+
+        print(f"Copying from: {source_path}")
+        shutil.copytree(source_path, SPACY_MODEL_PATH, dirs_exist_ok=True)
+        print(f"spaCy model saved to {SPACY_MODEL_PATH}")
+
+    else:
+        print("spaCy model found locally, loading...")
+
+    nlp = spacy.load(SPACY_MODEL_PATH)
+    nlp.add_pipe("textrank")
+    return nlp
 
 
 @st.cache_resource
@@ -148,6 +198,75 @@ def sumy_summarize(text, summarizer_class, n):
         return f"Failed: {e}"
 
 
+
+
+def pytextrank_summarize(text, n, nlp):
+    """
+    Uses spaCy + PyTextRank to extract key sentences.
+    PyTextRank scores sentences based on the importance
+    of the key phrases they contain.
+    """
+    try:
+        doc       = nlp(text)
+        sentences = [
+            sent.text.strip()
+            for sent in doc._.textrank.summary(limit_sentences=n)
+            if len(sent.text.strip()) > 40
+        ]
+
+        # Preserve original article order
+        all_sentences = [sent.text.strip() for sent in doc.sents]
+        ordered       = []
+        for sent in sentences:
+            try:
+                idx = all_sentences.index(sent)
+                ordered.append((idx, sent))
+            except ValueError:
+                continue
+
+        ordered.sort(key=lambda x: x[0])
+        return " ".join([s[1] for s in ordered]).strip()
+
+    except Exception as e:
+        return f"Failed: {e}"
+
+
+def semantic_summarize(text, n, st_model):
+    """
+    Uses Sentence Transformers to find sentences that are
+    most semantically similar to the overall document meaning.
+    Unlike keyword methods — understands meaning not just words.
+    """
+    try:
+        sentences = sent_tokenize(text)
+        sentences = [s for s in sentences if len(s.strip()) > 40]
+
+        if len(sentences) <= n:
+            return " ".join(sentences)
+
+        # Encode all sentences into vectors
+        embeddings = st_model.encode(sentences)
+
+        # Encode full document as average of all sentence vectors
+        doc_embedding = embeddings.mean(axis=0, keepdims=True)
+
+        # Score each sentence by similarity to document
+        scores      = cosine_similarity(embeddings, doc_embedding).flatten()
+
+        # Pick top N indices
+        top_indices = scores.argsort()[-n:][::-1]
+
+        # Sort back into original article order
+        top_indices = sorted(top_indices)
+
+        return " ".join([sentences[i] for i in top_indices])
+
+    except Exception as e:
+        return f"Failed: {e}"
+
+
+
+
 def bart_summarize(text, bart):
     try:
         model, tokenizer = bart
@@ -223,12 +342,19 @@ with st.sidebar:
     st.divider()
     st.subheader("Methods to Run")
 
+    st.divider()
+    st.subheader("Extractive Methods")
     run_lsa       = st.checkbox("LSA",           value=True)
     run_lexrank   = st.checkbox("LexRank",        value=True)
     run_textrank  = st.checkbox("TextRank",       value=True)
     run_luhn      = st.checkbox("Luhn",           value=True)
     run_sumbasic  = st.checkbox("SumBasic",       value=True)
     run_kl        = st.checkbox("KL-Divergence",  value=True)
+    run_pytextrank = st.checkbox("PyTextRank (spaCy)",      value=True)
+    run_semantic  = st.checkbox("Sentence Transformers",    value=True)
+
+    st.divider()
+    st.subheader("Abstractive Methods")
     run_t5        = st.checkbox("T5-Small",       value=True)
     run_bart      = st.checkbox("BART",           value=False)  
 
@@ -257,41 +383,99 @@ if run_button and url:
     st.divider()
 
 
-    extractive_methods = []
-    if run_lsa:      extractive_methods.append(("LSA",          lambda t: sumy_summarize(t, LsaSummarizer,     num_sentences)))
-    if run_lexrank:  extractive_methods.append(("LexRank",      lambda t: sumy_summarize(t, LexRankSummarizer,  num_sentences)))
-    if run_textrank: extractive_methods.append(("TextRank",     lambda t: sumy_summarize(t, TextRankSummarizer, num_sentences)))
-    if run_luhn:     extractive_methods.append(("Luhn",         lambda t: sumy_summarize(t, LuhnSummarizer,     num_sentences)))
-    if run_sumbasic: extractive_methods.append(("SumBasic",     lambda t: sumy_summarize(t, SumBasicSummarizer, num_sentences)))
-    if run_kl:       extractive_methods.append(("KL-Divergence",lambda t: sumy_summarize(t, KLSummarizer,       num_sentences)))
+    sumy_methods = []
+    if run_lsa:      sumy_methods.append(("LSA",           lambda t: sumy_summarize(t, LsaSummarizer,     num_sentences)))
+    if run_lexrank:  sumy_methods.append(("LexRank",       lambda t: sumy_summarize(t, LexRankSummarizer,  num_sentences)))
+    if run_textrank: sumy_methods.append(("TextRank",      lambda t: sumy_summarize(t, TextRankSummarizer, num_sentences)))
+    if run_luhn:     sumy_methods.append(("Luhn",          lambda t: sumy_summarize(t, LuhnSummarizer,     num_sentences)))
+    if run_sumbasic: sumy_methods.append(("SumBasic",      lambda t: sumy_summarize(t, SumBasicSummarizer, num_sentences)))
+    if run_kl:       sumy_methods.append(("KL-Divergence", lambda t: sumy_summarize(t, KLSummarizer,       num_sentences)))
 
 
     st.header("Extractive Methods")
 
-    for name, func in extractive_methods:
+    for name, func in sumy_methods:
         with st.spinner(f"Running {name}..."):
             summary, elapsed, ram = measure(func, cleaned)
 
-        with st.container():
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1:
-                st.markdown(f"### {name}")
-            with col2:
-                st.metric("Time", f"{elapsed}s")
-            with col3:
-                st.metric("RAM", f"{ram}MB")
-            with col4:
-                st.metric("Words", len(summary.split()))
+        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+        with col1:
+            st.markdown(f"### {name}")
+        with col2:
+            st.metric("Time", f"{elapsed}s")
+        with col3:
+            st.metric("RAM", f"{ram}MB")
+        with col4:
+            st.metric("Words", len(summary.split()))
 
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Summary**")
-                st.markdown(summary)
-            with right:
-                st.markdown("**Baseline (First N Sentences)**")
-                st.markdown(baseline)
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Summary**")
+            st.markdown(summary)
+        with right:
+            st.markdown("**Baseline (First N Sentences)**")
+            st.markdown(baseline)
 
-            st.divider()
+        st.divider()
+
+    # PyTextRank
+    if run_pytextrank:
+        with st.spinner("Loading spaCy model..."):
+            nlp_model = load_spacy()
+        with st.spinner("Running PyTextRank..."):
+            summary, elapsed, ram = measure(
+                pytextrank_summarize, cleaned, num_sentences, nlp_model
+            )
+
+        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+        with col1:
+            st.markdown("### PyTextRank (spaCy)")
+        with col2:
+            st.metric("Time", f"{elapsed}s")
+        with col3:
+            st.metric("RAM", f"{ram}MB")
+        with col4:
+            st.metric("Words", len(summary.split()))
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Summary**")
+            st.markdown(summary)
+        with right:
+            st.markdown("**Baseline (First N Sentences)**")
+            st.markdown(baseline)
+
+        st.divider()
+
+    # Sentence Transformers
+    if run_semantic:
+        with st.spinner("Loading Sentence Transformer model..."):
+            st_model = load_sentence_transformer()
+        with st.spinner("Running Semantic Summarization..."):
+            summary, elapsed, ram = measure(
+                semantic_summarize, cleaned, num_sentences, st_model
+            )
+
+        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+        with col1:
+            st.markdown("### Sentence Transformers")
+        with col2:
+            st.metric("Time", f"{elapsed}s")
+        with col3:
+            st.metric("RAM", f"{ram}MB")
+        with col4:
+            st.metric("Words", len(summary.split()))
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Summary**")
+            st.markdown(summary)
+        with right:
+            st.markdown("**Baseline (First N Sentences)**")
+            st.markdown(baseline)
+
+        st.divider()
+
 
     st.header("Abstractive Methods")
 
