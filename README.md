@@ -1,6 +1,6 @@
 # Summary Method Comparator
 
-Compares 8 summarization methods side by side.
+Compares 10 summarization methods side by side.
 
 ## Setup
 
