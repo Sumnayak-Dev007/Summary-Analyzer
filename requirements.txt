@@ -6,8 +6,8 @@ spacy==3.8.14
 pytextrank==3.3.0
 sentence-transformers==5.4.1
 scikit-learn==1.8.0
-transformers==4.44.2
-torch==2.9.0
+transformers
+torch
 sentencepiece==0.2.1
 numpy==1.26.4
 psutil==7.2.2
