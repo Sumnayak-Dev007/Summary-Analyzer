@@ -4,7 +4,6 @@ sumy==0.12.0
 nltk==3.9.4
 spacy==3.8.14
 pytextrank==3.3.0
-en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 sentence-transformers==5.4.1
 scikit-learn==1.8.0
 transformers==4.44.2
