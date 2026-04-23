@@ -89,7 +89,28 @@ def load_sentence_transformer():
 
 @st.cache_resource
 def load_spacy():
-    nlp = spacy.load("en_core_web_sm")
+    if not os.path.exists(SPACY_MODEL_PATH):
+        print("spaCy model not found locally, downloading...")
+        os.makedirs(SPACY_MODEL_PATH, exist_ok=True)
+
+        spacy.cli.download("en_core_web_sm")
+
+        import en_core_web_sm
+        import shutil
+
+        source_path = os.path.join(
+            en_core_web_sm.__path__[0],
+            "en_core_web_sm-3.8.0"        
+        )
+
+        print(f"Copying from: {source_path}")
+        shutil.copytree(source_path, SPACY_MODEL_PATH, dirs_exist_ok=True)
+        print(f"spaCy model saved to {SPACY_MODEL_PATH}")
+
+    else:
+        print("spaCy model found locally, loading...")
+
+    nlp = spacy.load(SPACY_MODEL_PATH)
     nlp.add_pipe("textrank")
     return nlp
 
