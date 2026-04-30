@@ -2,7 +2,7 @@
 """
 category_extractor.py
 ─────────────────────
-Category extraction using spaCy NER only - no frequency-based garbage.
+Category extraction using spaCy NER with aggressive filtering.
 """
 
 import os
@@ -17,68 +17,57 @@ import streamlit as st
 import spacy
 
 
-# ── Quality filter constants (from original) ──────────────────────────────────
+# ── Quality filter constants ──────────────────────────────────────────────────
 
-JUNK_STANDALONE = {
-    "news", "look", "first", "things", "it", "this", "there", "after", "to",
-    "in", "on", "at", "if", "the", "a", "an", "how", "why", "when", "what",
-    "who", "where", "said", "says", "latest", "update", "updates", "new",
-    "old", "big", "small", "good", "bad", "best", "top", "all", "more",
-    "less", "own", "out", "up", "down", "off", "over",
+# Words that indicate junk/non-entities
+JUNK_WORDS = {
+    "news", "look", "first", "things", "it", "this", "there", "after", 
+    "said", "says", "latest", "update", "updates", "new", "old", "big", 
+    "small", "good", "bad", "best", "top", "all", "more", "less",
+    "plus", "ultra", "slim", "metal", "glass", "plastic", "lite", "pro", "max",
 }
 
-NOISE_VERBS = {
-    "say", "see", "tell", "know", "think", "go", "come", "be", "exit",
-    "push", "visit", "want", "walk", "look", "rescind", "talk", "approve",
-    "make", "do", "using", "taking", "getting", "giving", "having", "saying",
-    "knowing", "thinking", "finding", "asking", "trying", "leaving",
-    "following", "showing", "keeping", "calling", "working", "running",
-    "moving", "building", "writing", "becoming", "opening", "cutting",
+# Product specification patterns to filter out
+SPEC_PATTERNS = [
+    # Battery specs
+    r'\d+\s*(mah|mAh|MAH|battery|Battery)',
+    r'\d+\s*(w|W|watts?|Watts?)',
+    # Display specs
+    r'\d+(\.\d+)?\s*(inch|"|″|inches?)',
+    r'\d+(k|K)\s*(display|screen)?',
+    r'\d+(\.\d+)?\s*(hdr|HDR|oled|OLED|lcd|LCD)',
+    # Storage/RAM
+    r'\d+\s*(gb|GB|tb|TB|mb|MB|ram|RAM|rom|ROM|storage)',
+    # Performance
+    r'\d+\s*(hz|Hz|ghz|GHz|mhz|MHz|fps|FPS)',
+    # Camera specs
+    r'\d+\s*(mp|MP|megapixel|Megapixel)',
+    # Units
+    r'\d+\s*(nits|Nits|nit|Nit|ppp|PPP)',
+    # Colors with numbers
+    r'^\d+\s*bits?',
+    r'\d+\s*[\-]\s*bit',
+    # Generic numbers
+    r'^\d+\s*(hrs?|Hrs?)',
+    r'^\d+\s*(%|percent)',
+    # WiFi/Bluetooth generations
+    r'wi[-\s]*fi\s*\d+',
+    r'bluetooth\s*\d+',
+]
+
+# Organization noise patterns
+ORG_NOISE = {
+    "adaptive refresh rate", "refresh rate", "display", "processor", "chipset",
+    "speaker", "camera", "battery", "charging", "wireless", "bluetooth",
+    "rating", "certified", "display", "screen", "audio", "sound",
+    "lte", "5g", "4g", "wifi", "wi-fi",
 }
 
-HONORIFIC_PREFIXES = frozenset({
-    "dr", "dr.", "prof", "prof.", "professor",
-    "mr", "mr.", "mrs", "mrs.", "ms", "ms.", "miss",
-    "sir", "rev", "rev.", "gen", "gen.",
-    "col", "col.", "lt", "lt.", "capt", "capt.",
-    "sgt", "sgt.", "cpl", "cpl.",
-})
-
-PERSON_TITLE_ONLY_TOKENS = frozenset({
-    "president", "vice", "prime", "minister", "senator", "governor",
-    "mayor", "chief", "justice", "judge", "secretary", "chairman",
-    "chairwoman", "director", "commissioner", "chancellor", "ambassador",
-    "consul", "sheriff", "superintendent", "commander", "admiral",
-    "general", "colonel", "lieutenant", "captain", "sergeant", "corporal",
-    "private", "representative", "delegate", "councillor", "councilor",
-    "alderman", "speaker", "treasurer", "comptroller", "auditor",
-})
-
-PERSON_HEADLINE_JUNK = frozenset({
-    "news", "update", "updates", "video", "interview", "press",
-    "photos", "photo", "latest", "breaking", "exclusive", "report",
-    "statement", "conference", "briefing", "speech", "remarks",
-    "announces", "says", "said", "advertisement", "live", "watch",
-    "read", "today", "roundup", "recap", "preview", "profile",
-})
-
-PERSON_BLACKLIST = {"news", "update", "video", "photos", "advertisement", "live"}
-
-ORG_HINT_WORDS = {
-    "inc", "llc", "ltd", "plc", "corp", "company", "co", "group", "bank",
-    "university", "ministry", "department", "agency", "government", "council",
-    "committee", "authority", "technologies", "systems", "solutions", "labs",
-}
-
-# Product-related terms to filter out
-PRODUCT_NOISE = {
-    "battery", "mah", "display", "screen", "pixel", "refresh rate", "hz",
-    "gb", "ram", "rom", "storage", "processor", "snapdragon", "dimensity",
-    "camera", "megapixel", "mp", "ultra wide", "telephoto", "zoom",
-    "charging", "watts", "w", "fast charging", "wireless",
-    "bluetooth", "wifi", "5g", "lte", "nfc", "usb", "type-c",
-    "inch", "nit", "color", "hdr", "dolby", "speaker", "audio",
-    "price", "discount", "offer", "sale", "emi", "rupees", "rs",
+# Person noise patterns
+PERSON_NOISE = {
+    "battery", "display", "screen", "processor", "camera", "speaker",
+    "wireless", "bluetooth", "charging", "rating", "discount", "purchase",
+    "offer", "sale", "price", "rs", "rupees",
 }
 
 
@@ -90,116 +79,149 @@ class Category:
     score: float = 0.0
     source: str = "spacy_ner"
     entity_type: str = "unknown"
-    lq_reasons: list[str] = field(default_factory=list)
     is_clean: bool = True
 
 
-# ── Quality filter helpers (from original) ────────────────────────────────────
+# ── Filtering functions ───────────────────────────────────────────────────────
 
-def _is_non_ascii(name: str) -> bool:
-    if not name:
-        return False
-    return sum(1 for c in name if ord(c) > 127) / max(len(name), 1) > 0.50
-
-
-def _is_verb_heavy(doc) -> bool:
-    free_verbs = sum(1 for t in doc if t.pos_ in {"VERB", "AUX"} and t.ent_type_ == "")
-    return (free_verbs / max(len(doc), 1)) > 0.40
-
-
-def _format_reasons(name: str) -> list[str]:
-    reasons: list[str] = []
-    s = name.strip()
-    if not s:
-        reasons.append("empty_name")
-        return reasons
-    if len(s) <= 2:
-        reasons.append("too_short")
-    if re.fullmatch(r"[\W_]+", s):
-        reasons.append("only_symbols")
-    if re.fullmatch(r"\d+", s):
-        reasons.append("only_digits")
-    if re.search(r"(.)\1{4,}", s.lower()):
-        reasons.append("repeated_chars")
-    return reasons
-
-
-def _is_product_noise(name: str) -> bool:
-    """Check if the entity is actually a product spec/feature rather than a brand"""
-    name_lower = name.lower()
-    for noise_term in PRODUCT_NOISE:
-        if noise_term in name_lower:
+def is_product_spec(text: str) -> bool:
+    """Check if text looks like a product specification"""
+    text_lower = text.lower()
+    
+    # Check against spec patterns
+    for pattern in SPEC_PATTERNS:
+        if re.search(pattern, text_lower, re.IGNORECASE):
             return True
-    # Check for measurements (numbers with units)
-    if re.search(r'\d+\s*(gb|tb|mb|kb|ghz|mhz|hz|mah|w|mm|cm|inch|"%")', name_lower):
+    
+    # Check for pure numbers or very short texts
+    if re.match(r'^[\d\s\+\-\(\)\|]+$', text):
         return True
-    # Check for specs with numbers
-    if re.search(r'\d+(k|p|x)\s*(display|screen|resolution)?', name_lower):
-        return True
+    
+    # Check for spec indicators
+    spec_indicators = ['mah', 'gb', 'mb', 'hz', 'fps', 'mp', 'inch', 'nits', 
+                       'ram', 'rom', 'cpu', 'gpu', 'display', 'screen', 
+                       'battery', 'charging', 'processor', 'camera']
+    
+    words = text_lower.split()
+    if len(words) <= 3:
+        for indicator in spec_indicators:
+            if indicator in text_lower:
+                return True
+    
     return False
 
 
-def _quality_reasons(name: str, doc) -> list[str]:
-    reasons = _format_reasons(name)
-    if _is_non_ascii(name):
-        reasons.append("non_english")
-    if name.strip().lower() in JUNK_STANDALONE:
-        reasons.append("junk_standalone")
-    if _is_product_noise(name):
-        reasons.append("product_spec")
-    tokens = [t.text.lower() for t in doc if not t.is_punct and not t.is_space]
-    if tokens and all(t in NOISE_VERBS for t in tokens):
-        reasons.append("all_verb_tokens")
-    if _is_verb_heavy(doc):
-        reasons.append("verb_heavy")
-    return reasons
-
-
-def _clean_and_validate_person_name(raw: str) -> Optional[str]:
-    """Validate if a name is actually a person name"""
-    # Skip if it contains numbers
-    if re.search(r'\d', raw):
-        return None
+def is_too_generic(text: str) -> bool:
+    """Check if entity name is too generic to be useful"""
+    text_lower = text.lower()
     
-    # Skip if it looks like a product spec
-    if _is_product_noise(raw):
-        return None
+    # Single word generic terms
+    if text_lower in JUNK_WORDS:
+        return True
     
-    tokens = raw.strip().split()
-    while tokens and tokens[0].rstrip(".").lower() in HONORIFIC_PREFIXES:
-        tokens = tokens[1:]
-    if not tokens or len(tokens) < 2 or len(tokens) > 4:
-        return None
-    lo = {t.lower().rstrip(".,") for t in tokens}
-    if (lo - {"the", "a", "an"}) <= PERSON_TITLE_ONLY_TOKENS:
-        return None
-    if lo & PERSON_HEADLINE_JUNK or lo & PERSON_BLACKLIST:
-        return None
-    return " ".join(tokens)
+    # Very short (likely not meaningful)
+    if len(text) <= 2:
+        return True
+    
+    # All lowercase with no spaces (likely not a proper noun)
+    if text.islower() and ' ' not in text:
+        if len(text) <= 4:
+            return True
+    
+    return False
 
 
-def _looks_like_org_name(name: str) -> bool:
-    """Check if name looks like an organization"""
-    # Skip if it contains numbers or looks like a product
-    if re.search(r'\d', name) or _is_product_noise(name):
+def is_valid_person_name(name: str) -> bool:
+    """Validate person name (should be real name, not product or spec)"""
+    # Skip if it contains numbers or units
+    if re.search(r'\d', name) or is_product_spec(name):
         return False
     
-    lo = re.sub(r"[^a-z0-9 ]+", " ", name.strip().lower()).strip()
-    tokens = lo.split()
-    if not tokens:
+    # Skip if it's product noise
+    name_lower = name.lower()
+    if any(noise in name_lower for noise in PERSON_NOISE):
+        return False
+    
+    # Person names should have at least first and last name (2+ words)
+    # or be a well-known single name (probable false positive, so require 2+)
+    words = name.split()
+    if len(words) < 2:
+        return False
+    
+    # Check if words are proper case (not all caps or all lowercase)
+    if not any(w[0].isupper() for w in words):
+        return False
+    
+    # Skip if it contains measurement units
+    if re.search(r'\d+\s*(%|percent|mah|gb|hz)', name_lower):
+        return False
+    
+    return True
+
+
+def is_valid_organization(name: str) -> bool:
+    """Validate organization name"""
+    # Skip specs and noise
+    if is_product_spec(name):
+        return False
+    
+    name_lower = name.lower()
+    
+    # Skip if it's common org noise
+    if name_lower in ORG_NOISE:
         return False
     
     # Check for organization indicators
-    org_indicators = ORG_HINT_WORDS
-    has_org_indicator = any(t in org_indicators for t in tokens)
+    org_indicators = ['inc', 'llc', 'ltd', 'corp', 'company', 'group', 'labs', 
+                     'technologies', 'systems', 'solutions', 'corporation']
     
-    # Check for all-caps acronym (e.g., "NASA", "IBM")
-    is_acronym = bool(re.fullmatch(r"[A-Z]{2,8}", name.strip()))
+    # Organizations often have multiple words or proper case
+    words = name.split()
     
-    # Check for proper capitalization pattern (e.g., "Apple Inc.")
-    has_proper_case = all(w[0].isupper() for w in tokens if len(w) > 1)
+    # Single word organizations should be significant length
+    if len(words) == 1:
+        if len(name) < 4:
+            return False
+        # Must be proper case or acronym
+        if not (name.isupper() or name[0].isupper()):
+            return False
     
-    return has_org_indicator or is_acronym or has_proper_case
+    return True
+
+
+def is_valid_place(name: str) -> bool:
+    """Validate place/location name"""
+    # Skip specs
+    if is_product_spec(name):
+        return False
+    
+    # Places should be proper nouns
+    if not name[0].isupper():
+        return False
+    
+    # Skip very short
+    if len(name) < 3:
+        return False
+    
+    return True
+
+
+def is_valid_product(name: str) -> bool:
+    """Validate product name"""
+    # Skip if it's a spec
+    if is_product_spec(name):
+        return False
+    
+    # Product names should have proper capitalization
+    words = name.split()
+    
+    # Skip generic product names
+    generic_products = {'phone', 'tablet', 'laptop', 'device', 'gadget', 
+                       'earbuds', 'speaker', 'watch', 'band', 'charger'}
+    if name.lower() in generic_products:
+        return False
+    
+    return True
 
 
 # ── Model loader ──────────────────────────────────────────────────────────────
@@ -217,12 +239,11 @@ def _load_spacy():
     return None
 
 
-# ── NER Extraction (the ONLY source - no frequency fallback) ─────────────────
+# ── NER Extraction with strict filtering ─────────────────────────────────────
 
 def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
     """
-    Extract named entities using spaCy NER only.
-    This is the ONLY source of categories - no frequency-based garbage.
+    Extract named entities using spaCy NER with aggressive filtering
     """
     doc = nlp(cleaned_text[:100000])  # Limit text length
     
@@ -235,69 +256,42 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
         "NORP": "organization",
         "PRODUCT": "product",
         "EVENT": "event",
-        "WORK_OF_ART": "product",
-        "LAW": "unknown",
-        "DATE": "unknown",
-        "TIME": "unknown",
-        "PERCENT": "unknown",
-        "MONEY": "unknown",
-        "QUANTITY": "unknown",
-        "ORDINAL": "unknown",
-        "CARDINAL": "unknown",
     }
     
     seen: dict[str, dict] = {}
     
     for ent in doc.ents:
-        # Skip entity types we don't care about
+        # Skip unwanted entity types
         if ent.label_ not in label_map:
-            continue
-        
-        # Skip low-confidence entity types
-        if label_map[ent.label_] == "unknown":
             continue
         
         text = ent.text.strip()
         
-        # Basic filtering
-        if len(text) < 3:
+        # Skip short or generic texts
+        if len(text) < 3 or is_too_generic(text):
             continue
         
-        # Skip product specs and noise
-        if _is_product_noise(text):
+        # Skip product specifications
+        if is_product_spec(text):
             continue
         
         # Validate based on entity type
-        if ent.label_ == "PERSON":
-            validated = _clean_and_validate_person_name(text)
-            if not validated:
-                continue
-            text = validated
-            entity_type = "person"
-        elif ent.label_ in ["ORG", "NORP"]:
-            if not _looks_like_org_name(text):
-                # Only keep if it has organization characteristics
-                if len(text) < 4:
-                    continue
-            entity_type = "organization"
-        elif ent.label_ in ["GPE", "LOC", "FAC"]:
-            # Skip if it looks like a product spec
-            if _is_product_noise(text):
-                continue
-            entity_type = "place"
-        elif ent.label_ == "PRODUCT":
-            # Only keep product names that look like brands, not specs
-            if _is_product_noise(text):
-                continue
-            # Skip generic product names
-            if text.lower() in ["phone", "tablet", "laptop", "device", "gadget"]:
-                continue
-            entity_type = "product"
-        elif ent.label_ == "EVENT":
-            entity_type = "event"
-        else:
-            continue
+        entity_type = label_map[ent.label_]
         
+        if entity_type == "person":
+            if not is_valid_person_name(text):
+                continue
+        elif entity_type == "organization":
+            if not is_valid_organization(text):
+                continue
+        elif entity_type == "place":
+            if not is_valid_place(text):
+                continue
+        elif entity_type == "product":
+            if not is_valid_product(text):
+                continue
+        
+        # Count frequencies
         key = text.lower()
         
         if key not in seen:
@@ -325,8 +319,7 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
 
 def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
     """
-    Main extraction function - uses ONLY spaCy NER, no frequency fallback.
-    raw_html parameter is kept for compatibility but not used.
+    Main extraction function - uses ONLY spaCy NER with aggressive filtering
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
@@ -343,39 +336,28 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
     # Extract entities using spaCy NER only
     categories = extract_entities_with_spacy(cleaned_text, nlp)
     
-    # Apply quality filter to all categories
-    final_categories = []
-    for cat in categories:
-        doc = nlp(cat.name)
-        reasons = _quality_reasons(cat.name, doc)
-        if reasons:
-            cat.is_clean = False
-            cat.lq_reasons = reasons
-        final_categories.append(cat)
-    
     elapsed = time.monotonic() - t0
     ram_used = proc.memory_info().rss / 1024 / 1024 - ram0
     
-    return _build_result(final_categories, round(elapsed, 3), round(ram_used, 1))
+    return _build_result(categories, round(elapsed, 3), round(ram_used, 1))
 
 
 def _build_result(categories: list, elapsed_s: float, ram_mb: float) -> dict:
     """Build result dictionary with statistics"""
-    n_clean = sum(1 for c in categories if c.is_clean)
-    n_lq = sum(1 for c in categories if not c.is_clean)
+    n_clean = len(categories)
     
     return {
         "categories": categories,
         "elapsed_s": elapsed_s,
         "ram_mb": ram_mb,
         "n_clean": n_clean,
-        "n_lq": n_lq,
-        "n_person": sum(1 for c in categories if c.is_clean and c.entity_type == "person"),
-        "n_org": sum(1 for c in categories if c.is_clean and c.entity_type == "organization"),
-        "n_place": sum(1 for c in categories if c.is_clean and c.entity_type == "place"),
-        "n_product": sum(1 for c in categories if c.is_clean and c.entity_type == "product"),
-        "n_event": sum(1 for c in categories if c.is_clean and c.entity_type == "event"),
-        "n_unknown": sum(1 for c in categories if c.is_clean and c.entity_type == "unknown"),
+        "n_lq": 0,
+        "n_person": sum(1 for c in categories if c.entity_type == "person"),
+        "n_org": sum(1 for c in categories if c.entity_type == "organization"),
+        "n_place": sum(1 for c in categories if c.entity_type == "place"),
+        "n_product": sum(1 for c in categories if c.entity_type == "product"),
+        "n_event": sum(1 for c in categories if c.entity_type == "event"),
+        "n_unknown": sum(1 for c in categories if c.entity_type == "unknown"),
     }
 
 
@@ -420,28 +402,42 @@ def render_cat_results(result: dict):
         return
     
     # Display metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("⏱️ Time", f"{result['elapsed_s']}s")
     with col2:
         st.metric("💾 RAM", f"{result['ram_mb']:.0f} MB")
     with col3:
-        st.metric("✅ Clean", result["n_clean"])
+        st.metric("✅ Entities Found", result["n_clean"])
     with col4:
-        st.metric("🚫 Filtered", result["n_lq"])
-    with col5:
-        st.metric("📊 Total", len(result["categories"]))
+        st.metric("📊 Unique Entities", len(result["categories"]))
     
     st.markdown("---")
     
-    # Display only clean categories
-    clean = [c for c in result["categories"] if c.is_clean]
-    dirty = [c for c in result["categories"] if not c.is_clean]
+    # Display categories
+    clean = result["categories"]
     
     if clean:
-        st.markdown("### 🏷️ Extracted Named Entities")
+        # Entity type breakdown
+        type_counts = {
+            "Person": result["n_person"],
+            "Organization": result["n_org"],
+            "Place": result["n_place"],
+            "Product": result.get("n_product", 0),
+            "Event": result.get("n_event", 0),
+        }
         
-        # Display categories table
+        if any(type_counts.values()):
+            with st.expander("📈 Entity Type Breakdown", expanded=False):
+                import pandas as pd
+                df_counts = pd.DataFrame([
+                    {"Type": k, "Count": v}
+                    for k, v in type_counts.items()
+                    if v > 0
+                ])
+                st.dataframe(df_counts, hide_index=True, use_container_width=True)
+        
+        # Display table
         entity_color_map = {
             "person": "#388bfd",
             "organization": "#3fb950",
@@ -458,6 +454,8 @@ def render_cat_results(result: dict):
                 f'<tr>'
                 f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
                 f'<td style="padding:7px 12px">{_badge(cat.entity_type)}</td>'
+                f'<td style="padding:7px 12px;color:#8b949e;font-size:12px;'
+                f'font-family:monospace">{cat.source}</td>'
                 f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score, clr)}</td>'
                 f'</tr>'
             )
@@ -470,34 +468,24 @@ def render_cat_results(result: dict):
             f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
             f'color:#8b949e;font-family:monospace;text-transform:uppercase">Type</th>'
             f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
+            f'color:#8b949e;font-family:monospace;text-transform:uppercase">Source</th>'
+            f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
             f'color:#8b949e;font-family:monospace;text-transform:uppercase">Frequency Score</th>'
-            f'<tr></thead><tbody>{rows}</tbody></table>',
+            f'</table></thead><tbody>{rows}</tbody></table>',
             unsafe_allow_html=True,
         )
         
         # Download button
-        if clean:
-            import pandas as pd
-            csv = pd.DataFrame([{
-                "name": c.name,
-                "entity_type": c.entity_type,
-                "frequency_score": c.score,
-            } for c in clean]).to_csv(index=False).encode()
-            st.download_button(
-                "📥 Download entities (CSV)",
-                csv,
-                file_name="named_entities.csv",
-                mime="text/csv",
-                use_container_width=False,
-            )
-    
-    # Show filtered out categories
-    if dirty:
-        with st.expander(f"🚫 {len(dirty)} entities filtered out (product specs, noise, etc.)"):
-            for cat in dirty:
-                reason_text = " | ".join(cat.lq_reasons) if cat.lq_reasons else "quality_filter"
-                st.markdown(
-                    f'<span style="font-family:monospace;font-size:12px;color:#8b949e">'
-                    f'<b>{cat.name}</b> — {reason_text}</span>',
-                    unsafe_allow_html=True,
-                )
+        import pandas as pd
+        csv = pd.DataFrame([{
+            "name": c.name,
+            "entity_type": c.entity_type,
+            "frequency_score": c.score,
+        } for c in clean]).to_csv(index=False).encode()
+        st.download_button(
+            "📥 Download entities (CSV)",
+            csv,
+            file_name="named_entities.csv",
+            mime="text/csv",
+            use_container_width=False,
+        )
