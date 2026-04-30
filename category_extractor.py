@@ -466,7 +466,7 @@ def _bar(score: float) -> str:
         f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
         f'<div style="width:{pct}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
         f'</div>'
-        f'<span style="font-size:13px;color:#333">{score:.2f}</span>'
+        f'<span style="font-size:13px>{score:.2f}</span>'
         f'</div>'
     )
 
@@ -508,13 +508,13 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     
     header_html = "".join([
         f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
-        f'color:#666;font-family:monospace;text-transform:uppercase">{h}</th>'
+        f'color:var(--streamlit-text-color);font-family:monospace;text-transform:uppercase">{h}</th>'
         for h in headers
     ])
     
     st.markdown(
-        f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;border:1px solid #ddd">'
-        f'<thead><tr style="background:#f5f5f5">{header_html}</tr></thead>'
+        f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;border:1px solid var(--streamlit-border-color)">'
+        f'<thead><tr style="background:var(--streamlit-secondary-bg-color)">{header_html} </tr></thead>'
         f'<tbody>{rows}</tbody><table>',
         unsafe_allow_html=True,
     )
