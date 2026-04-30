@@ -7,26 +7,10 @@ import streamlit as st
 import trafilatura
 import spacy
 import pytextrank
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from sumy.parsers.plaintext import PlaintextParser
-from nltk.tokenize import sent_tokenize
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lsa import LsaSummarizer
-from sumy.summarizers.luhn import LuhnSummarizer
-from sumy.summarizers.lex_rank import LexRankSummarizer
-from sumy.summarizers.text_rank import TextRankSummarizer
-from sumy.summarizers.sum_basic import SumBasicSummarizer
-from sumy.summarizers.kl import KLSummarizer
-from transformers import (
-    BartForConditionalGeneration, BartTokenizer,
-    T5ForConditionalGeneration, T5Tokenizer
-)
-from category_extractor import render_category_extractor
 
 st.set_page_config(
-    page_title="Summary Comparator",
-    page_icon="🔬",
+    page_title="Article Analyzer",
+    page_icon="",
     layout="wide"
 )
 
@@ -62,59 +46,35 @@ NOISE_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH    = os.path.join(BASE_DIR, "local-models", "bart-large-cnn")
-T5_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "t5-small")
-ST_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "all-MiniLM-L6-v2")
+BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
+SPACY_LG_PATH    = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
 
 
-@st.cache_resource
-def load_sentence_transformer():
-    if not os.path.exists(ST_MODEL_PATH):
-        os.makedirs(ST_MODEL_PATH, exist_ok=True)
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        model.save(ST_MODEL_PATH)
-    return SentenceTransformer(ST_MODEL_PATH)
-
+# ── Model loading ─────────────────────────────────────────────────────────────
 
 @st.cache_resource
-def load_spacy():
+def load_spacy_lg():
+    # en_core_web_lg has better NER and word vectors than sm/md
+    # installed via requirements.txt wheel URL
     try:
-        nlp = spacy.load("en_core_web_sm")
+        nlp = spacy.load("en_core_web_lg")
         nlp.add_pipe("textrank")
         return nlp
     except OSError:
-        spacy.cli.download("en_core_web_sm")
-        nlp = spacy.load("en_core_web_sm")
-        nlp.add_pipe("textrank")
-        return nlp
+        try:
+            nlp = spacy.load("en_core_web_md")
+            nlp.add_pipe("textrank")
+            return nlp
+        except OSError:
+            st.error(
+                "spaCy model not found. Add to requirements.txt:\n"
+                "en-core-web-lg @ https://github.com/explosion/spacy-models/"
+                "releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+            )
+            st.stop()
 
 
-@st.cache_resource
-def load_bart():
-    if not os.path.exists(MODEL_PATH):
-        os.makedirs(MODEL_PATH, exist_ok=True)
-        BartForConditionalGeneration.from_pretrained(
-            "facebook/bart-large-cnn").save_pretrained(MODEL_PATH)
-        BartTokenizer.from_pretrained(
-            "facebook/bart-large-cnn").save_pretrained(MODEL_PATH)
-    model     = BartForConditionalGeneration.from_pretrained(MODEL_PATH)
-    tokenizer = BartTokenizer.from_pretrained(MODEL_PATH)
-    return model, tokenizer
-
-
-@st.cache_resource
-def load_t5():
-    if not os.path.exists(T5_MODEL_PATH):
-        os.makedirs(T5_MODEL_PATH, exist_ok=True)
-        T5ForConditionalGeneration.from_pretrained(
-            "t5-small").save_pretrained(T5_MODEL_PATH)
-        T5Tokenizer.from_pretrained(
-            "t5-small").save_pretrained(T5_MODEL_PATH)
-    model     = T5ForConditionalGeneration.from_pretrained(T5_MODEL_PATH)
-    tokenizer = T5Tokenizer.from_pretrained(T5_MODEL_PATH)
-    return model, tokenizer
-
+# ── Article fetching ──────────────────────────────────────────────────────────
 
 def fetch_and_extract(url: str) -> str | None:
     downloaded = trafilatura.fetch_url(url)
@@ -124,13 +84,15 @@ def fetch_and_extract(url: str) -> str | None:
         downloaded,
         include_comments=False,
         include_tables=False,
+        favor_precision=True,      # reduces boilerplate vs recall tradeoff
+        deduplicate=True,          # removes duplicate paragraphs
     )
     if not raw_text:
         return None
     lines = []
     for line in raw_text.split("\n"):
         line = line.strip()
-        if len(line) < 50:
+        if len(line) < 40:
             continue
         if NOISE_PATTERNS.search(line):
             continue
@@ -144,104 +106,114 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def sumy_summarize(text, summarizer_class, n):
-    try:
-        parser            = PlaintextParser.from_string(text, Tokenizer("english"))
-        summarizer        = summarizer_class()
-        summary_sentences = summarizer(parser.document, n)
-        original          = [str(s) for s in parser.document.sentences]
-        ordered           = []
-        for s in summary_sentences:
-            s_str = str(s)
-            if len(s_str) <= 40:
-                continue
-            try:
-                idx = original.index(s_str)
-                ordered.append((idx, s_str))
-            except ValueError:
-                continue
-        ordered.sort(key=lambda x: x[0])
-        return " ".join([i[1] for i in ordered]).strip()
-    except Exception as e:
-        return f"Failed: {e}"
+# ── TextRank summarization (tuned) ────────────────────────────────────────────
 
+def textrank_summarize(
+    text: str,
+    nlp,
+    n_sentences: int = 5,
+    min_sentence_len: int = 40,
+    focus_phrases: list[str] | None = None,
+) -> dict:
+    """
+    TextRank via spaCy + PyTextRank.
 
-def pytextrank_summarize(text, n, nlp):
-    try:
-        doc       = nlp(text)
-        sentences = [
-            sent.text.strip()
-            for sent in doc._.textrank.summary(limit_sentences=n)
-            if len(sent.text.strip()) > 40
-        ]
-        all_sentences = [sent.text.strip() for sent in doc.sents]
-        ordered       = []
-        for sent in sentences:
-            try:
-                idx = all_sentences.index(sent)
-                ordered.append((idx, sent))
-            except ValueError:
-                continue
-        ordered.sort(key=lambda x: x[0])
-        return " ".join([s[1] for s in ordered]).strip()
-    except Exception as e:
-        return f"Failed: {e}"
+    TextRank builds a graph where sentences are nodes and edges are
+    weighted by how many important phrases they share. Sentences that
+    share many high-ranked phrases get high scores.
 
+    Tuning applied here vs default:
+    - min_sentence_len filters fragments before scoring
+    - focus_phrases biases the graph toward sentences containing
+      user-specified terms (e.g. article subject, key person name)
+    - Sentences returned in original article order (not score order)
+      so the summary reads naturally
+    - Overlapping/near-duplicate sentences are deduplicated by
+      checking token overlap ratio before adding to output
 
-def semantic_summarize(text, n, st_model):
-    try:
-        sentences = sent_tokenize(text)
-        sentences = [s for s in sentences if len(s.strip()) > 40]
-        if len(sentences) <= n:
-            return " ".join(sentences)
-        embeddings    = st_model.encode(sentences)
-        doc_embedding = embeddings.mean(axis=0, keepdims=True)
-        scores        = cosine_similarity(embeddings, doc_embedding).flatten()
-        top_indices   = sorted(scores.argsort()[-n:][::-1])
-        return " ".join([sentences[i] for i in top_indices])
-    except Exception as e:
-        return f"Failed: {e}"
+    Returns a dict with summary text + per-sentence scores for display.
+    """
+    proc     = psutil.Process(os.getpid())
+    ram_before = proc.memory_info().rss / 1024 / 1024
+    t0       = time.monotonic()
 
+    # spaCy processes up to 100k chars to avoid memory issues on long articles
+    doc = nlp(text[:100_000])
 
-def bart_summarize(text, bart):
-    try:
-        model, tokenizer = bart
-        inputs = tokenizer(text, max_length=1024, truncation=True, return_tensors="pt")
-        ids    = model.generate(
-            inputs["input_ids"],
-            max_length=130, min_length=30,
-            length_penalty=2.0, num_beams=4, early_stopping=True
-        )
-        return tokenizer.decode(ids[0], skip_special_tokens=True)
-    except Exception as e:
-        return f"Failed: {e}"
+    # Collect all sentences with their textrank scores
+    # doc._.textrank.calc_textgraph() already ran via the pipe
+    sent_scores: dict[str, float] = {}
+    for phrase in doc._.phrases:
+        for sent in doc.sents:
+            if phrase.text.lower() in sent.text.lower():
+                sent_text = sent.text.strip()
+                sent_scores[sent_text] = sent_scores.get(sent_text, 0) + phrase.rank
 
+    # Boost sentences containing focus phrases if provided
+    if focus_phrases:
+        for sent_text, score in sent_scores.items():
+            for fp in focus_phrases:
+                if fp.lower() in sent_text.lower():
+                    sent_scores[sent_text] = score * 1.5
 
-def t5_summarize(text, t5):
-    try:
-        model, tokenizer = t5
-        inputs  = tokenizer(
-            "summarize: " + text,
-            max_length=512, truncation=True, return_tensors="pt"
-        )
-        ids     = model.generate(
-            inputs["input_ids"],
-            max_length=130, min_length=30,
-            length_penalty=2.0, num_beams=4, early_stopping=True
-        )
-        summary   = tokenizer.decode(ids[0], skip_special_tokens=True)
-        sentences = re.split(r'(?<=[.!?])\s+', summary)
-        return " ".join([s.capitalize() for s in sentences])
-    except Exception as e:
-        return f"Failed: {e}"
+    # Filter by minimum length
+    sent_scores = {
+        s: sc for s, sc in sent_scores.items()
+        if len(s) >= min_sentence_len
+    }
 
+    if not sent_scores:
+        # Fallback: return first n sentences if textrank found nothing
+        fallback = [
+            s.text.strip() for s in doc.sents
+            if len(s.text.strip()) >= min_sentence_len
+        ][:n_sentences]
+        return {
+            "summary":    " ".join(fallback),
+            "sentences":  [(s, 0.0) for s in fallback],
+            "elapsed_s":  round(time.monotonic() - t0, 3),
+            "ram_mb":     round(proc.memory_info().rss / 1024 / 1024 - ram_before, 1),
+            "method":     "fallback (first-n)",
+        }
 
-def first_sentences(text, n):
-    sentences = [
-        s.strip() for s in re.split(r"(?<=[.!?])\s+", text)
-        if len(s.strip()) > 35
-    ]
-    return " ".join(sentences[:n])
+    # Pick top-n by score
+    top_sents = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
+
+    # Deduplicate by token overlap — don't include near-duplicate sentences
+    def _overlap(a: str, b: str) -> float:
+        ta = set(a.lower().split())
+        tb = set(b.lower().split())
+        if not ta or not tb:
+            return 0.0
+        return len(ta & tb) / min(len(ta), len(tb))
+
+    selected: list[tuple[str, float]] = []
+    for sent_text, score in top_sents:
+        if len(selected) >= n_sentences:
+            break
+        if any(_overlap(sent_text, s) > 0.6 for s, _ in selected):
+            continue
+        selected.append((sent_text, score))
+
+    # Restore original article order
+    all_sents_ordered = [s.text.strip() for s in doc.sents]
+    selected_ordered  = sorted(
+        selected,
+        key=lambda x: all_sents_ordered.index(x[0])
+        if x[0] in all_sents_ordered else 9999
+    )
+
+    summary = " ".join(s for s, _ in selected_ordered)
+    elapsed = time.monotonic() - t0
+    ram_d   = proc.memory_info().rss / 1024 / 1024 - ram_before
+
+    return {
+        "summary":   summary,
+        "sentences": selected_ordered,
+        "elapsed_s": round(elapsed, 3),
+        "ram_mb":    round(ram_d, 1),
+        "method":    "textrank",
+    }
 
 
 def measure(func, *args):
@@ -254,167 +226,115 @@ def measure(func, *args):
     return result, elapsed, ram_used
 
 
-st.title("Summary Method Comparator")
-st.markdown("Compare extractive and abstractive summarization methods side by side.")
+# ── UI ────────────────────────────────────────────────────────────────────────
+
+st.title("Article Analyzer")
+st.markdown("TextRank summarization and category extraction with NER tagging.")
 
 with st.sidebar:
     st.header("Settings")
+
     url = st.text_input(
         "Article URL",
         placeholder="https://www.hindustantimes.com/..."
     )
-    num_sentences = st.slider(
-        "Sentences to be picked by extractive methods",
-        min_value=2, max_value=10, value=5
-    )
-    st.divider()
-    st.subheader("Methods to Run")
-    st.divider()
-    st.subheader("Extractive Methods")
-    run_lsa        = st.checkbox("LSA",                   value=True)
-    run_lexrank    = st.checkbox("LexRank",               value=True)
-    run_textrank   = st.checkbox("TextRank",              value=True)
-    run_luhn       = st.checkbox("Luhn",                  value=True)
-    run_sumbasic   = st.checkbox("SumBasic",              value=True)
-    run_kl         = st.checkbox("KL-Divergence",         value=True)
-    run_pytextrank = st.checkbox("PyTextRank (spaCy)",    value=True)
-    run_semantic   = st.checkbox("Sentence Transformers", value=True)
-    st.divider()
-    st.subheader("Abstractive Methods")
-    run_t5   = st.checkbox("T5-Small", value=True)
-    run_bart = st.checkbox("BART",     value=False)
-    run_button = st.button("Run Comparison", type="primary", use_container_width=True)
 
+    st.divider()
+    st.subheader("Summarization")
+
+    n_sentences = st.slider(
+        "Number of sentences in summary",
+        min_value=2, max_value=15, value=5
+    )
+
+    min_sent_len = st.slider(
+        "Minimum sentence length (chars)",
+        min_value=20, max_value=100, value=40,
+        help="Shorter sentences are filtered before scoring"
+    )
+
+    focus_phrases_input = st.text_input(
+        "Focus phrases (comma separated)",
+        placeholder="e.g. Narendra Modi, Budget 2025",
+        help="Sentences containing these phrases get boosted scores"
+    )
+    focus_phrases = (
+        [p.strip() for p in focus_phrases_input.split(",") if p.strip()]
+        if focus_phrases_input.strip() else None
+    )
+
+    run_button = st.button("Analyze Article", type="primary", use_container_width=True)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+if run_button and not url:
+    st.warning("Please enter a URL.")
 
 if run_button and url:
-    with st.spinner("Fetching and extracting article..."):
+    with st.spinner("Fetching article..."):
         raw_text = fetch_and_extract(url)
 
     if not raw_text:
-        st.error("Could not extract content from URL.")
+        st.error("Could not extract content from this URL. The site may block scrapers.")
     else:
-        cleaned  = clean_text(raw_text)
-        baseline = first_sentences(cleaned, num_sentences)
-
+        cleaned = clean_text(raw_text)
         st.session_state["article_text"] = cleaned
         st.session_state["article_url"]  = url.strip()
 
-        st.success(f"Extracted {len(cleaned.split())} words")
+        st.success(f"Extracted {len(cleaned.split()):,} words from article")
 
-        with st.expander("Extracted Article Body"):
+        with st.expander("Full article text"):
             st.write(cleaned)
 
         st.divider()
 
-        sumy_methods = []
-        if run_lsa:      sumy_methods.append(("LSA",           lambda t: sumy_summarize(t, LsaSummarizer,     num_sentences)))
-        if run_lexrank:  sumy_methods.append(("LexRank",       lambda t: sumy_summarize(t, LexRankSummarizer,  num_sentences)))
-        if run_textrank: sumy_methods.append(("TextRank",      lambda t: sumy_summarize(t, TextRankSummarizer, num_sentences)))
-        if run_luhn:     sumy_methods.append(("Luhn",          lambda t: sumy_summarize(t, LuhnSummarizer,     num_sentences)))
-        if run_sumbasic: sumy_methods.append(("SumBasic",      lambda t: sumy_summarize(t, SumBasicSummarizer, num_sentences)))
-        if run_kl:       sumy_methods.append(("KL-Divergence", lambda t: sumy_summarize(t, KLSummarizer,       num_sentences)))
+        # Load model and run TextRank
+        with st.spinner("Loading spaCy model..."):
+            nlp = load_spacy_lg()
 
-        st.header("Extractive Methods")
+        with st.spinner("Running TextRank..."):
+            result = textrank_summarize(
+                cleaned, nlp,
+                n_sentences=n_sentences,
+                min_sentence_len=min_sent_len,
+                focus_phrases=focus_phrases,
+            )
 
-        for name, func in sumy_methods:
-            with st.spinner(f"Running {name}..."):
-                summary, elapsed, ram = measure(func, cleaned)
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1: st.markdown(f"### {name}")
-            with col2: st.metric("Time", f"{elapsed}s")
-            with col3: st.metric("RAM",  f"{ram}MB")
-            with col4: st.metric("Words", len(summary.split()))
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Summary**")
-                st.markdown(summary)
-            with right:
-                st.markdown("**Baseline (First N Sentences)**")
-                st.markdown(baseline)
-            st.divider()
+        st.header("Summary")
 
-        if run_pytextrank:
-            with st.spinner("Loading spaCy model..."):
-                nlp_model = load_spacy()
-            with st.spinner("Running PyTextRank..."):
-                summary, elapsed, ram = measure(pytextrank_summarize, cleaned, num_sentences, nlp_model)
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1: st.markdown("### PyTextRank (spaCy)")
-            with col2: st.metric("Time", f"{elapsed}s")
-            with col3: st.metric("RAM",  f"{ram}MB")
-            with col4: st.metric("Words", len(summary.split()))
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Summary**")
-                st.markdown(summary)
-            with right:
-                st.markdown("**Baseline (First N Sentences)**")
-                st.markdown(baseline)
-            st.divider()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Time", f"{result['elapsed_s']}s")
+        with col2:
+            st.metric("RAM delta", f"{result['ram_mb']} MB")
+        with col3:
+            st.metric("Sentences", len(result["sentences"]))
 
-        if run_semantic:
-            with st.spinner("Loading Sentence Transformer model..."):
-                st_model = load_sentence_transformer()
-            with st.spinner("Running Semantic Summarization..."):
-                summary, elapsed, ram = measure(semantic_summarize, cleaned, num_sentences, st_model)
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1: st.markdown("### Sentence Transformers")
-            with col2: st.metric("Time", f"{elapsed}s")
-            with col3: st.metric("RAM",  f"{ram}MB")
-            with col4: st.metric("Words", len(summary.split()))
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Summary**")
-                st.markdown(summary)
-            with right:
-                st.markdown("**Baseline (First N Sentences)**")
-                st.markdown(baseline)
-            st.divider()
+        st.markdown(result["summary"])
 
-        st.header("Abstractive Methods")
+        with st.expander("Sentence scores (TextRank ranking)"):
+            for sent_text, score in sorted(result["sentences"], key=lambda x: -x[1]):
+                bar_w = int(min(score / max(s for _, s in result["sentences"]) * 100, 100)) if result["sentences"] else 0
+                st.markdown(
+                    f'<div style="margin-bottom:10px">'
+                    f'<div style="font-size:13px;margin-bottom:4px">{sent_text}</div>'
+                    f'<div style="display:flex;align-items:center;gap:8px">'
+                    f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
+                    f'<div style="width:{bar_w}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
+                    f'</div>'
+                    f'<span style="font-family:monospace;font-size:11px;color:#666">{score:.4f}</span>'
+                    f'</div></div>',
+                    unsafe_allow_html=True
+                )
 
-        if run_t5:
-            with st.spinner("Loading T5 model..."):
-                t5_model = load_t5()
-            with st.spinner("Generating T5 summary..."):
-                summary, elapsed, ram = measure(t5_summarize, cleaned, t5_model)
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1: st.markdown("### T5-Small")
-            with col2: st.metric("Time", f"{elapsed}s")
-            with col3: st.metric("RAM",  f"{ram}MB")
-            with col4: st.metric("Words", len(summary.split()))
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Summary**")
-                st.markdown(summary)
-            with right:
-                st.markdown("**Baseline**")
-                st.markdown(baseline)
-            st.divider()
 
-        if run_bart:
-            with st.spinner("Loading BART model (this takes a moment)..."):
-                bart_model = load_bart()
-            with st.spinner("Generating BART summary..."):
-                summary, elapsed, ram = measure(bart_summarize, cleaned, bart_model)
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1: st.markdown("### BART")
-            with col2: st.metric("Time", f"{elapsed}s")
-            with col3: st.metric("RAM",  f"{ram}MB")
-            with col4: st.metric("Words", len(summary.split()))
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Summary**")
-                st.markdown(summary)
-            with right:
-                st.markdown("**Baseline**")
-                st.markdown(baseline)
-
-elif run_button and not url:
-    st.warning("Please enter a URL first")
+# ── Category extraction — always visible, uses same URL ───────────────────────
 
 st.divider()
-st.header("Category Extraction & NER Tagging")
+st.header("Category Extraction and NER Tagging")
+
+from category_extractor import render_category_extractor
 
 cat_text = None
 if url and url.strip():
