@@ -2,7 +2,7 @@
 """
 category_extractor.py
 ─────────────────────
-Category extraction using spaCy NER with aggressive filtering.
+Category extraction using spaCy NER with precise filtering.
 Shows raw extracted categories, cleaned categories, and discarded categories.
 """
 
@@ -28,47 +28,56 @@ JUNK_WORDS = {
     "plus", "ultra", "slim", "metal", "glass", "plastic", "lite", "pro", "max",
 }
 
-# Product specification patterns to filter out
+# Product specification patterns - ONLY for technical specs
 SPEC_PATTERNS = [
-    # Battery specs
-    r'\d+\s*(mah|mAh|MAH|battery|Battery)',
-    r'\d+\s*(w|W|watts?|Watts?)',
-    # Display specs
-    r'\d+(\.\d+)?\s*(inch|"|″|inches?)',
-    r'\d+(k|K)\s*(display|screen)?',
-    r'\d+(\.\d+)?\s*(hdr|HDR|oled|OLED|lcd|LCD)',
-    # Storage/RAM
-    r'\d+\s*(gb|GB|tb|TB|mb|MB|ram|RAM|rom|ROM|storage)',
+    # Battery specs (only when clearly a spec)
+    r'^\d+\s*(mah|mAh|MAH)$',
+    r'^\d+\s*(w|W|watts?|Watts?)$',
+    r'\d+\s*mah\s+battery',
+    # Display specs with clear measurements
+    r'^\d+(\.\d+)?\s*(inch|"|″)$',
+    r'^\d+(k|K)\s*(display|screen)$',
+    # Storage/RAM (single value)
+    r'^\d+\s*(gb|GB|tb|TB|mb|MB)$',
+    r'^\d+\s*(ram|RAM|rom|ROM)$',
     # Performance
-    r'\d+\s*(hz|Hz|ghz|GHz|mhz|MHz|fps|FPS)',
+    r'^\d+\s*(hz|Hz|ghz|GHz|mhz|MHz)$',
+    r'^\d+\s*fps$',
     # Camera specs
-    r'\d+\s*(mp|MP|megapixel|Megapixel)',
-    # Units
-    r'\d+\s*(nits|Nits|nit|Nit|ppp|PPP)',
-    # Colors with numbers
-    r'^\d+\s*bits?',
-    r'\d+\s*[\-]\s*bit',
-    # Generic numbers
-    r'^\d+\s*(hrs?|Hrs?)',
-    r'^\d+\s*(%|percent)',
-    # WiFi/Bluetooth generations
-    r'wi[-\s]*fi\s*\d+',
-    r'bluetooth\s*\d+',
+    r'^\d+\s*(mp|MP)$',
+    # Units alone
+    r'^\d+\s*(nits|Nits)$',
+    r'^\d+\s*%$',
+    # Generic numbers with units
+    r'^\d+\s*(hrs?|Hrs?)$',
+    # WiFi/Bluetooth (only if just the version)
+    r'^wi[-\s]*fi\s*\d+$',
+    r'^bluetooth\s*\d+$',
 ]
 
-# Organization noise patterns
-ORG_NOISE = {
-    "adaptive refresh rate", "refresh rate", "display", "processor", "chipset",
-    "speaker", "camera", "battery", "charging", "wireless", "bluetooth",
-    "rating", "certified", "display", "screen", "audio", "sound",
-    "lte", "5g", "4g", "wifi", "wi-fi",
+# Keep these for additional checks but don't over-filter
+TECH_INDICATORS = ['mah', 'gb', 'mb', 'hz', 'fps', 'mp', 'nits', 'ram', 'rom']
+
+# Valid organization names that should never be filtered (common acronyms)
+VALID_ORGANIZATIONS = {
+    "IPL", "BCCI", "ICC", "FIFA", "UEFA", "NBA", "NFL", "MLB", "NHL",
+    "NASA", "ISRO", "WHO", "UN", "NATO", "EU", "CWG", "AIIMS", "IIT",
+    "IIM", "US", "UK", "UAE", "AI", "SAI"
 }
 
-# Person noise patterns
-PERSON_NOISE = {
-    "battery", "display", "screen", "processor", "camera", "speaker",
-    "wireless", "bluetooth", "charging", "rating", "discount", "purchase",
-    "offer", "sale", "price", "rs", "rupees",
+# Valid place names that should never be filtered
+VALID_PLACES = {
+    "Mumbai", "Delhi", "Bangalore", "Chennai", "Kolkata", "Hyderabad",
+    "Pune", "Ahmedabad", "Jaipur", "Lucknow", "Kanpur", "Nagpur",
+    "Indore", "Thane", "Bhopal", "Visakhapatnam", "Patna", "Vadodara",
+    "Ludhiana", "Agra", "Nashik", "Ranchi", "Gurgaon", "Noida"
+}
+
+# Organization noise patterns (only for clearly non-organization phrases)
+ORG_NOISE = {
+    "adaptive refresh rate", "refresh rate", "display", "chipset",
+    "speaker", "charging", "wireless", "bluetooth",
+    "rating", "certified",
 }
 
 
@@ -87,28 +96,29 @@ class Category:
 # ── Filtering functions ───────────────────────────────────────────────────────
 
 def is_product_spec(text: str) -> bool:
-    """Check if text looks like a product specification"""
-    text_lower = text.lower()
+    """Check if text looks like a product specification - only obvious technical specs"""
+    text_stripped = text.strip()
+    text_lower = text_stripped.lower()
     
-    # Check against spec patterns
+    # Don't filter out proper names that happen to contain numbers
+    if text_stripped[0].isupper() and len(text_stripped) > 2:
+        # Check if it's like "OnePlus 9" (brand + number) - should be kept as product
+        if len(text_stripped.split()) >= 2:
+            # Keep product names like "OnePlus 9", "iPhone 12"
+            return False
+    
+    # Check against spec patterns - must match the whole string approx
     for pattern in SPEC_PATTERNS:
-        if re.search(pattern, text_lower, re.IGNORECASE):
+        if re.match(pattern, text_lower, re.IGNORECASE):
             return True
     
-    # Check for pure numbers or very short texts
-    if re.match(r'^[\d\s\+\-\(\)\|]+$', text):
+    # Check if it's just a number with unit (no other words)
+    if re.match(r'^[\d\.\s]+(mah|gb|mb|hz|fps|mp|nits|w|watts?)$', text_lower):
         return True
     
-    # Check for spec indicators
-    spec_indicators = ['mah', 'gb', 'mb', 'hz', 'fps', 'mp', 'inch', 'nits', 
-                       'ram', 'rom', 'cpu', 'gpu', 'display', 'screen', 
-                       'battery', 'charging', 'processor', 'camera']
-    
-    words = text_lower.split()
-    if len(words) <= 3:
-        for indicator in spec_indicators:
-            if indicator in text_lower:
-                return True
+    # Check for pure numbers
+    if re.match(r'^[\d\s\+\-\(\)\|]+$', text_stripped):
+        return True
     
     return False
 
@@ -125,36 +135,34 @@ def is_too_generic(text: str) -> bool:
     if len(text) <= 2:
         return True
     
-    # All lowercase with no spaces (likely not a proper noun)
-    if text.islower() and ' ' not in text:
-        if len(text) <= 4:
-            return True
-    
     return False
 
 
 def is_valid_person_name(name: str) -> bool:
-    """Validate person name (should be real name, not product or spec)"""
-    # Skip if it contains numbers or units
-    if re.search(r'\d', name) or is_product_spec(name):
+    """Validate person name"""
+    # Skip if it's a product spec
+    if is_product_spec(name):
         return False
     
-    # Skip if it's product noise
-    name_lower = name.lower()
-    if any(noise in name_lower for noise in PERSON_NOISE):
+    # Common short names that are valid
+    if name in ["Advani", "Pankaj", "Kothari"]:
+        return True
+    
+    # Skip if it contains numbers
+    if re.search(r'\d', name):
         return False
     
     # Person names should have at least first and last name (2+ words)
+    # Or be a well-known single name
     words = name.split()
-    if len(words) < 2:
+    if len(words) == 1:
+        # Single word names are questionable, but allow if proper case and length > 3
+        if len(name) > 3 and name[0].isupper():
+            return True
         return False
     
-    # Check if words are proper case (not all caps or all lowercase)
+    # Check if words are proper case
     if not any(w[0].isupper() for w in words):
-        return False
-    
-    # Skip if it contains measurement units
-    if re.search(r'\d+\s*(%|percent|mah|gb|hz)', name_lower):
         return False
     
     return True
@@ -162,15 +170,16 @@ def is_valid_person_name(name: str) -> bool:
 
 def is_valid_organization(name: str) -> bool:
     """Validate organization name"""
-    # Skip specs and noise
+    # Check if it's in valid organizations list
+    name_upper = name.upper()
+    if name_upper in VALID_ORGANIZATIONS:
+        return True
+    
+    # Skip if it's a product spec
     if is_product_spec(name):
         return False
     
     name_lower = name.lower()
-    
-    # Skip if it's common org noise
-    if name_lower in ORG_NOISE:
-        return False
     
     # Check for organization indicators
     org_indicators = ['inc', 'llc', 'ltd', 'corp', 'company', 'group', 'labs', 
@@ -179,20 +188,26 @@ def is_valid_organization(name: str) -> bool:
     # Organizations often have multiple words or proper case
     words = name.split()
     
-    # Single word organizations should be significant length
+    # Allow acronyms (all caps, 2-5 letters)
+    if name.isupper() and 2 <= len(name) <= 5:
+        return True
+    
+    # Single word organizations
     if len(words) == 1:
-        if len(name) < 4:
-            return False
-        # Must be proper case or acronym
-        if not (name.isupper() or name[0].isupper()):
-            return False
+        if len(name) >= 3 and name[0].isupper():
+            return True
+        return False
     
     return True
 
 
 def is_valid_place(name: str) -> bool:
     """Validate place/location name"""
-    # Skip specs
+    # Check if it's in valid places list
+    if name in VALID_PLACES:
+        return True
+    
+    # Skip if it's a product spec
     if is_product_spec(name):
         return False
     
@@ -244,7 +259,7 @@ def _load_spacy():
 
 def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category], list[Category], list[Category]]:
     """
-    Extract named entities using spaCy NER with aggressive filtering.
+    Extract named entities using spaCy NER with precise filtering.
     Returns: (raw_categories, clean_categories, discarded_categories)
     """
     doc = nlp(cleaned_text[:100000])  # Limit text length
@@ -271,7 +286,7 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
         text = ent.text.strip()
         
         # Skip very short texts
-        if len(text) < 3:
+        if len(text) < 2:
             continue
         
         entity_type = label_map[ent.label_]
@@ -303,10 +318,10 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
     for cat in raw_categories:
         filter_reason = None
         
-        # Check if it's a product spec
+        # Skip product specs entirely
         if is_product_spec(cat.name):
             filter_reason = "product_specification"
-        # Check if too generic
+        # Skip overly generic terms
         elif is_too_generic(cat.name):
             filter_reason = "too_generic"
         # Validate based on entity type
@@ -322,14 +337,21 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
         elif cat.entity_type == "product":
             if not is_valid_product(cat.name):
                 filter_reason = "invalid_product"
+            else:
+                # Products are allowed in raw but not required for final clean
+                pass
+        elif cat.entity_type == "event":
+            # Events are allowed in raw but not required for final clean
+            pass
         
         if filter_reason:
             cat.is_clean = False
             cat.filter_reason = filter_reason
             discarded_categories.append(cat)
         else:
-            # Only keep person, organization, and place for final display
-            if cat.entity_type in ["person", "organization", "place"]:
+            # Keep person, organization, and place for final display
+            # Also keep products if they are valid
+            if cat.entity_type in ["person", "organization", "place", "product"]:
                 clean_categories.append(cat)
             else:
                 cat.is_clean = False
@@ -343,7 +365,7 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
 
 def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
     """
-    Main extraction function - uses ONLY spaCy NER with aggressive filtering
+    Main extraction function - uses ONLY spaCy NER with precise filtering
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
@@ -474,7 +496,7 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     st.markdown(
         f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">'
         f'<thead><tr style="background:#21262d">{header_html}</tr></thead>'
-        f'<tbody>{rows}</tbody></table>',
+        f'<tbody>{rows}</tbody><table>',
         unsafe_allow_html=True,
     )
 
@@ -508,7 +530,7 @@ def render_cat_results(result: dict):
     
     # Show cleaned categories (only person, organization, place)
     st.markdown("### ✅ Cleaned & Validated Categories")
-    st.caption("Showing only validated Person, Organization, and Place entities")
+    st.caption("Showing validated Person, Organization, and Place entities")
     render_table(result["clean_categories"], "")
     
     # Show discarded categories
