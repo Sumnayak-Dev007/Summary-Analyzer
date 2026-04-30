@@ -207,11 +207,11 @@ with st.sidebar:
         if focus_input.strip() else None
     )
 
-    btn_summarize  = st.button("Analyze Article",      type="primary",   use_container_width=True)
+    btn_summarize  = st.button("Analyze Article",      type="primary",   width="stretch")
 
     st.divider()
     st.subheader("Category Extraction")
-    btn_categories = st.button("Extract Categories",   type="secondary", use_container_width=True)
+    btn_categories = st.button("Extract Categories",   type="secondary", width="stretch")
 
 
 # ── Fetch article (shared between both tasks) ─────────────────────────────────
