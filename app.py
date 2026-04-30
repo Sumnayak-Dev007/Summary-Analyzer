@@ -3,7 +3,6 @@ import os
 import time
 import nltk
 import psutil
-import requests
 import streamlit as st
 import trafilatura
 import spacy
@@ -26,9 +25,9 @@ from transformers import (
 from category_extractor import render_category_extractor
 
 st.set_page_config(
-    page_title  = "Summary Comparator",
-    page_icon   = "🔬",
-    layout      = "wide"
+    page_title="Summary Comparator",
+    page_icon="🔬",
+    layout="wide"
 )
 
 nltk_data_path = os.path.join(os.path.expanduser("~"), "nltk_data")
@@ -63,11 +62,10 @@ NOISE_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH       = os.path.join(BASE_DIR, "local-models", "bart-large-cnn")
-T5_MODEL_PATH    = os.path.join(BASE_DIR, "local-models", "t5-small")
-ST_MODEL_PATH    = os.path.join(BASE_DIR, "local-models", "all-MiniLM-L6-v2")
-SPACY_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "en_core_web_sm")
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH    = os.path.join(BASE_DIR, "local-models", "bart-large-cnn")
+T5_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "t5-small")
+ST_MODEL_PATH = os.path.join(BASE_DIR, "local-models", "all-MiniLM-L6-v2")
 
 
 @st.cache_resource
@@ -95,12 +93,11 @@ def load_spacy():
 @st.cache_resource
 def load_bart():
     if not os.path.exists(MODEL_PATH):
-        with st.spinner("Downloading BART model (~1.6GB)..."):
-            os.makedirs(MODEL_PATH, exist_ok=True)
-            BartForConditionalGeneration.from_pretrained(
-                "facebook/bart-large-cnn").save_pretrained(MODEL_PATH)
-            BartTokenizer.from_pretrained(
-                "facebook/bart-large-cnn").save_pretrained(MODEL_PATH)
+        os.makedirs(MODEL_PATH, exist_ok=True)
+        BartForConditionalGeneration.from_pretrained(
+            "facebook/bart-large-cnn").save_pretrained(MODEL_PATH)
+        BartTokenizer.from_pretrained(
+            "facebook/bart-large-cnn").save_pretrained(MODEL_PATH)
     model     = BartForConditionalGeneration.from_pretrained(MODEL_PATH)
     tokenizer = BartTokenizer.from_pretrained(MODEL_PATH)
     return model, tokenizer
@@ -109,12 +106,11 @@ def load_bart():
 @st.cache_resource
 def load_t5():
     if not os.path.exists(T5_MODEL_PATH):
-        with st.spinner("Downloading T5 model (~60MB)..."):
-            os.makedirs(T5_MODEL_PATH, exist_ok=True)
-            T5ForConditionalGeneration.from_pretrained(
-                "t5-small").save_pretrained(T5_MODEL_PATH)
-            T5Tokenizer.from_pretrained(
-                "t5-small").save_pretrained(T5_MODEL_PATH)
+        os.makedirs(T5_MODEL_PATH, exist_ok=True)
+        T5ForConditionalGeneration.from_pretrained(
+            "t5-small").save_pretrained(T5_MODEL_PATH)
+        T5Tokenizer.from_pretrained(
+            "t5-small").save_pretrained(T5_MODEL_PATH)
     model     = T5ForConditionalGeneration.from_pretrained(T5_MODEL_PATH)
     tokenizer = T5Tokenizer.from_pretrained(T5_MODEL_PATH)
     return model, tokenizer
@@ -258,8 +254,6 @@ def measure(func, *args):
     return result, elapsed, ram_used
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-
 st.title("Summary Method Comparator")
 st.markdown("Compare extractive and abstractive summarization methods side by side.")
 
@@ -277,14 +271,14 @@ with st.sidebar:
     st.subheader("Methods to Run")
     st.divider()
     st.subheader("Extractive Methods")
-    run_lsa        = st.checkbox("LSA",                    value=True)
-    run_lexrank    = st.checkbox("LexRank",                value=True)
-    run_textrank   = st.checkbox("TextRank",               value=True)
-    run_luhn       = st.checkbox("Luhn",                   value=True)
-    run_sumbasic   = st.checkbox("SumBasic",               value=True)
-    run_kl         = st.checkbox("KL-Divergence",          value=True)
-    run_pytextrank = st.checkbox("PyTextRank (spaCy)",     value=True)
-    run_semantic   = st.checkbox("Sentence Transformers",  value=True)
+    run_lsa        = st.checkbox("LSA",                   value=True)
+    run_lexrank    = st.checkbox("LexRank",               value=True)
+    run_textrank   = st.checkbox("TextRank",              value=True)
+    run_luhn       = st.checkbox("Luhn",                  value=True)
+    run_sumbasic   = st.checkbox("SumBasic",              value=True)
+    run_kl         = st.checkbox("KL-Divergence",         value=True)
+    run_pytextrank = st.checkbox("PyTextRank (spaCy)",    value=True)
+    run_semantic   = st.checkbox("Sentence Transformers", value=True)
     st.divider()
     st.subheader("Abstractive Methods")
     run_t5   = st.checkbox("T5-Small", value=True)
@@ -292,21 +286,16 @@ with st.sidebar:
     run_button = st.button("Run Comparison", type="primary", use_container_width=True)
 
 
-# ── Main logic ────────────────────────────────────────────────────────────────
-
 if run_button and url:
     with st.spinner("Fetching and extracting article..."):
         raw_text = fetch_and_extract(url)
 
     if not raw_text:
-        st.error("Could not extract content from URL. The site may be blocking scrapers or the URL may be invalid.")
+        st.error("Could not extract content from URL.")
     else:
         cleaned  = clean_text(raw_text)
         baseline = first_sentences(cleaned, num_sentences)
 
-        # ── Store in session state so category extractor can use it
-        #    across reruns (Streamlit re-runs the whole script on every
-        #    interaction, so local variables like `cleaned` don't survive)
         st.session_state["article_text"] = cleaned
         st.session_state["article_url"]  = url.strip()
 
@@ -424,36 +413,20 @@ if run_button and url:
 elif run_button and not url:
     st.warning("Please enter a URL first")
 
-# ── Category Extraction — independent feature, doesn't need Run Comparison ────
-# Has its own URL input so it works immediately without running summarization.
 st.divider()
-st.header("🏷️ Category Extraction & NER Tagging")
-
-cat_url = st.text_input(
-    "Article URL for category extraction",
-    value=url,   # pre-fills with whatever is in the sidebar URL field
-    placeholder="https://...",
-    key="cat_url_input",
-)
+st.header("Category Extraction & NER Tagging")
 
 cat_text = None
-if cat_url and cat_url.strip():
-    # Use already-fetched text if the URL matches, otherwise fetch fresh
+if url and url.strip():
     if (
         "article_text" in st.session_state
-        and st.session_state.get("article_url") == cat_url.strip()
+        and st.session_state.get("article_url") == url.strip()
     ):
         cat_text = st.session_state["article_text"]
-    else:
-        with st.spinner("Fetching article for category extraction..."):
-            raw = fetch_and_extract(cat_url.strip())
-        if raw:
-            cat_text = clean_text(raw)
-            st.session_state["cat_article_text"] = cat_text
-            st.session_state["cat_article_url"]  = cat_url.strip()
-        else:
-            st.error("Could not extract content from that URL.")
-elif "cat_article_text" in st.session_state:
-    cat_text = st.session_state["cat_article_text"]
+    elif (
+        "cat_article_url" in st.session_state
+        and st.session_state["cat_article_url"] == url.strip()
+    ):
+        cat_text = st.session_state["cat_article_text"]
 
-render_category_extractor(article_text=cat_text)
+render_category_extractor(article_text=cat_text, url=url.strip() if url else None)
