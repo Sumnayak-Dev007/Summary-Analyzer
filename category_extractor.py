@@ -295,15 +295,13 @@ def detect_topics(text: str) -> list[Category]:
 
 @st.cache_resource
 def _load_spacy():
-    """Load spaCy model with caching"""
-    for model_id in ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"]:
-        try:
-            nlp = spacy.load(model_id)
-            return nlp
-        except OSError:
-            continue
-    st.error("No spaCy model found. Please ensure en_core_web_lg is installed.")
-    return None
+    """Load spaCy large model with caching"""
+    try:
+        nlp = spacy.load("en_core_web_lg")
+        return nlp
+    except OSError:
+        st.error("en_core_web_lg model not found. Please install it with: python -m spacy download en_core_web_lg")
+        return None
 
 
 # ── NER Extraction with strict filtering ─────────────────────────────────────
@@ -468,7 +466,7 @@ def _bar(score: float) -> str:
         f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
         f'<div style="width:{pct}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
         f'</div>'
-        f'<span style="font-family:monospace;font-size:11px;color:#666">{score:.2f}</span>'
+        f'<span style="font-size:13px;color:#333">{score:.2f}</span>'
         f'</div>'
     )
 
@@ -486,20 +484,20 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
         if show_filter_reason and cat.filter_reason:
             rows += (
                 f'<tr>'
-                f'<td style="padding:7px 12px;font-size:15px">{cat.name}</td>'
-                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
-                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.source}</td>'
-                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score)}</td>'
-                f'<td style="padding:7px 12px;font-size:11px;color:#999">{cat.filter_reason}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.name}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.entity_type if cat.entity_type else "-"}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.source}</td>'
+                f'<td style="padding:7px 12px">{_bar(cat.score)}</td>'
+                f'<td style="padding:7px 12px;font-size:12px;color:#999">{cat.filter_reason}</td>'
                 f'</tr>'
             )
         else:
             rows += (
                 f'<tr>'
-                f'<td style="padding:7px 12px;font-size:15px">{cat.name}</td>'
-                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
-                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.source}</td>'
-                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score)}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.name}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.entity_type if cat.entity_type else "-"}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.source}</td>'
+                f'<td style="padding:7px 12px">{_bar(cat.score)}</td>'
                 f'</tr>'
             )
     
@@ -517,7 +515,7 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     st.markdown(
         f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;border:1px solid #ddd">'
         f'<thead><tr style="background:#f5f5f5">{header_html}</tr></thead>'
-        f'<tbody>{rows}</tbody></table>',
+        f'<tbody>{rows}</tbody><table>',
         unsafe_allow_html=True,
     )
 
