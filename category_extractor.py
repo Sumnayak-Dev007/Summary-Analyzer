@@ -486,9 +486,9 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
         if show_filter_reason and cat.filter_reason:
             rows += (
                 f'<tr>'
-                f'<td style="padding:7px 12px;font-size:13px">{cat.name}</td>'
-                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
-                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.source}</td>'
+                f'<td style="padding:7px 12px;font-size:15px">{cat.name}</td>'
+                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
+                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.source}</td>'
                 f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score)}</td>'
                 f'<td style="padding:7px 12px;font-size:11px;color:#999">{cat.filter_reason}</td>'
                 f'</tr>'
@@ -496,9 +496,9 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
         else:
             rows += (
                 f'<tr>'
-                f'<td style="padding:7px 12px;font-size:13px">{cat.name}</td>'
-                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
-                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.source}</td>'
+                f'<td style="padding:7px 12px;font-size:15px">{cat.name}</td>'
+                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
+                f'<td style="padding:7px 12px;font-size:15px;color:#666">{cat.source}</td>'
                 f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score)}</td>'
                 f'</tr>'
             )
