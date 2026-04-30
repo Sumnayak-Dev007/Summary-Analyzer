@@ -1,3 +1,35 @@
+#!/usr/bin/env python3
+"""
+category_extractor.py
+─────────────────────
+Streamlit page: Article → Category Extraction + NER Tagging
+
+Import in your main app via:
+    from category_extractor import render_category_extractor
+    render_category_extractor(cleaned_text)
+
+Or run standalone:
+    streamlit run category_extractor.py
+
+Four approaches to category extraction — all benchmarked side-by-side:
+
+  1. KeyBERT          — sentence-transformer embeddings find semantically
+                        relevant keyphrases even when words don't appear verbatim
+  2. spaCy NER        — uses built-in named entity recognition to extract
+                        entities as categories (persons, orgs, places, events)
+  3. Zero-shot BART   — treats it as a classification problem; given candidate
+                        labels it decides which ones fit the article
+  4. KeyBERT + GLiNER — KeyBERT extracts candidate phrases, GLiNER classifies
+                        entity type for each one
+
+All approaches:
+  - Run spaCy quality filter on every extracted category (same rules as enhance_categories.py)
+  - Classify each surviving category as person / organization / place / unknown
+  - Show timing + RAM per approach so you can benchmark which is fastest/best
+
+Models are self-downloading into models/ folder on first run.
+"""
+
 import os
 import re
 import shutil
@@ -206,18 +238,22 @@ def gliner_classify(categories: list[ExtractedCategory], gliner, threshold: floa
 @st.cache_resource(show_spinner=False)
 def load_spacy_model():
     import spacy
-    SPACY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    local = SPACY_CACHE_DIR / SPACY_MODEL_ID
-    if local.exists():
-        return spacy.load(str(local))
-    status = st.status(f"Downloading spaCy `{SPACY_MODEL_ID}`...", expanded=True)
-    subprocess.run([sys.executable, "-m", "spacy", "download", SPACY_MODEL_ID], check=True)
-    import spacy as _spacy
-    pkg  = Path(_spacy.util.get_package_path(SPACY_MODEL_ID))
-    data = next((p for p in pkg.iterdir() if (p / "config.cfg").exists()), pkg)
-    shutil.copytree(str(data), str(local))
-    status.update(label=f"spaCy cached", state="complete")
-    return _spacy.load(str(local))
+    # Model is installed via requirements.txt wheel URL — just load it directly.
+    # No subprocess/download needed; works on Streamlit Cloud and local alike.
+    try:
+        return spacy.load(SPACY_MODEL_ID)
+    except OSError:
+        # Fallback: try the lg model if md isn't available
+        try:
+            return spacy.load("en_core_web_lg")
+        except OSError:
+            st.error(
+                f"spaCy model `{SPACY_MODEL_ID}` not found. "
+                f"Add this line to requirements.txt:\n"
+                f"en-core-web-md @ https://github.com/explosion/spacy-models/"
+                f"releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl"
+            )
+            st.stop()
 
 
 @st.cache_resource(show_spinner=False)

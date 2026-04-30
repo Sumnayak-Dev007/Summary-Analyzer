@@ -308,6 +308,7 @@ if run_button and url:
         #    across reruns (Streamlit re-runs the whole script on every
         #    interaction, so local variables like `cleaned` don't survive)
         st.session_state["article_text"] = cleaned
+        st.session_state["article_url"]  = url.strip()
 
         st.success(f"Extracted {len(cleaned.split())} words")
 
@@ -423,10 +424,36 @@ if run_button and url:
 elif run_button and not url:
     st.warning("Please enter a URL first")
 
-# ── Category Extraction — only shown after a successful article fetch ─────────
-# st.session_state["article_text"] persists across Streamlit reruns, so the
-# category extractor stays visible even when the user clicks its own buttons.
-if "article_text" in st.session_state:
-    st.divider()
-    st.header("🏷️ Category Extraction & NER Tagging")
-    render_category_extractor(article_text=st.session_state["article_text"])
+# ── Category Extraction — independent feature, doesn't need Run Comparison ────
+# Has its own URL input so it works immediately without running summarization.
+st.divider()
+st.header("🏷️ Category Extraction & NER Tagging")
+
+cat_url = st.text_input(
+    "Article URL for category extraction",
+    value=url,   # pre-fills with whatever is in the sidebar URL field
+    placeholder="https://...",
+    key="cat_url_input",
+)
+
+cat_text = None
+if cat_url and cat_url.strip():
+    # Use already-fetched text if the URL matches, otherwise fetch fresh
+    if (
+        "article_text" in st.session_state
+        and st.session_state.get("article_url") == cat_url.strip()
+    ):
+        cat_text = st.session_state["article_text"]
+    else:
+        with st.spinner("Fetching article for category extraction..."):
+            raw = fetch_and_extract(cat_url.strip())
+        if raw:
+            cat_text = clean_text(raw)
+            st.session_state["cat_article_text"] = cat_text
+            st.session_state["cat_article_url"]  = cat_url.strip()
+        else:
+            st.error("Could not extract content from that URL.")
+elif "cat_article_text" in st.session_state:
+    cat_text = st.session_state["cat_article_text"]
+
+render_category_extractor(article_text=cat_text)
