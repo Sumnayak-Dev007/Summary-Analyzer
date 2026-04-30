@@ -14,4 +14,3 @@ numpy
 pandas
 psutil
 requests
-keybert
