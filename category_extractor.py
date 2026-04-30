@@ -21,7 +21,7 @@ import spacy
 # ── Topic Categories with Keywords ──────────────────────────────────────────
 
 TOPIC_CATEGORIES = {
-    "SPORTS": {
+    "Sports": {
         "keywords": [
             "sport", "sports", "football", "soccer", "cricket", "basketball", 
             "tennis", "baseball", "olympics", "world cup", "championship", 
@@ -32,7 +32,7 @@ TOPIC_CATEGORIES = {
             "sport and rights alliance"
         ]
     },
-    "POLITICS": {
+    "Politics": {
         "keywords": [
             "politics", "political", "government", "election", "vote", 
             "president", "prime minister", "minister", "parliament", "congress", 
@@ -41,7 +41,7 @@ TOPIC_CATEGORIES = {
             "diplomacy", "foreign policy", "treaty", "alliance", "sanction"
         ]
     },
-    "TECHNOLOGY": {
+    "Technology": {
         "keywords": [
             "technology", "tech", "software", "hardware", "app", "application",
             "digital", "ai", "artificial intelligence", "machine learning",
@@ -51,7 +51,7 @@ TOPIC_CATEGORIES = {
             "5g", "internet", "cloud", "cyber", "security"
         ]
     },
-    "BUSINESS": {
+    "Business": {
         "keywords": [
             "business", "company", "corporate", "enterprise", "startup",
             "market", "stock", "trading", "investment", "finance", "financial",
@@ -60,7 +60,7 @@ TOPIC_CATEGORIES = {
             "ceo", "executive", "management"
         ]
     },
-    "ENTERTAINMENT": {
+    "Entertainment": {
         "keywords": [
             "entertainment", "movie", "film", "cinema", "hollywood", "bollywood",
             "actor", "actress", "director", "producer", "celebrity", "star",
@@ -69,7 +69,7 @@ TOPIC_CATEGORIES = {
             "award", "oscar", "grammy", "emmy"
         ]
     },
-    "HEALTH": {
+    "Health": {
         "keywords": [
             "health", "medical", "medicine", "doctor", "hospital", "clinic",
             "disease", "illness", "treatment", "therapy", "surgery",
@@ -78,7 +78,7 @@ TOPIC_CATEGORIES = {
             "mental health", "wellbeing", "care", "patient"
         ]
     },
-    "SCIENCE": {
+    "Science": {
         "keywords": [
             "science", "research", "study", "scientist", "laboratory", "lab",
             "discovery", "experiment", "data", "analysis", "finding",
@@ -87,7 +87,7 @@ TOPIC_CATEGORIES = {
             "sustainability", "renewable", "energy", "nuclear", "quantum"
         ]
     },
-    "ENVIRONMENT": {
+    "Environment": {
         "keywords": [
             "environment", "climate", "climate change", "global warming",
             "sustainability", "renewable", "green", "eco", "ecological",
