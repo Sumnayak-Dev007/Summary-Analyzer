@@ -43,6 +43,7 @@ from typing import Optional
 
 import psutil
 import streamlit as st
+import trafilatura
 
 # ── Model cache dirs (same convention as enhance_categories.py) ───────────────
 MODELS_DIR      = Path(os.environ.get("MODELS_DIR", Path(__file__).parent / "models"))
@@ -55,6 +56,24 @@ SPACY_MODEL_ID  = "en_core_web_md"
 GLINER_MODEL_ID = "urchade/gliner_medium-v2.1"
 KEYBERT_MODEL   = "all-MiniLM-L6-v2"
 ZERO_SHOT_MODEL = "facebook/bart-large-mnli"
+
+# ── Article fetching (mirrors app.py) ────────────────────────────────────────
+
+def fetch_and_extract(url: str):
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        return None
+    raw = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+    if not raw:
+        return None
+    lines = [l.strip() for l in raw.split("\n") if len(l.strip()) >= 50]
+    return " ".join(lines) if lines else None
+
+def clean_text(text: str) -> str:
+    import re as _re
+    text = _re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
 
 # ── Quality filter constants (identical to enhance_categories.py) ─────────────
 JUNK_STANDALONE = {
@@ -308,7 +327,7 @@ def load_gliner_model():
 # Approach 1 — KeyBERT
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_keybert(
+def extract_keybert(
     text: str, nlp, gliner, top_n: int = 15, use_gliner: bool = False
 ) -> ApproachResult:
     """
@@ -364,7 +383,7 @@ def run_keybert(
 # Approach 2 — spaCy NER
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_spacy_ner(text: str, nlp) -> ApproachResult:
+def extract_spacy_ner(text: str, nlp) -> ApproachResult:
     """
     Extracts named entities from the article text using spaCy's built-in NER.
 
@@ -448,7 +467,7 @@ CANDIDATE_CATEGORIES = [
     "Crime", "Court", "Law", "Corruption",
 ]
 
-def run_zero_shot(
+def extract_zero_shot(
     text: str, nlp, top_n: int = 15, custom_labels: Optional[list[str]] = None
 ) -> ApproachResult:
     """
@@ -498,7 +517,7 @@ def run_zero_shot(
 # Approach 4 — KeyBERT + GLiNER combined
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_keybert_gliner(text: str, nlp, top_n: int = 15) -> ApproachResult:
+def extract_keybert_gliner(text: str, nlp, top_n: int = 15) -> ApproachResult:
     """
     Two-stage pipeline:
       Stage 1: KeyBERT extracts semantically relevant keyphrases
@@ -699,11 +718,11 @@ def render_benchmark_table(results: list[ApproachResult]):
 # Main render function — called from main app or standalone
 # ────────────────────────────────────────────────────────────────────────────
 
-def render_category_extractor(article_text: Optional[str] = None):
+def render_category_extractor(article_text: Optional[str] = None, url: Optional[str] = None):
     """
     Main entry point.
-    article_text: pre-extracted article body (passed from main app).
-                  If None, shows a text area for manual input.
+    article_text : pre-extracted article body (reused from summarizer if available).
+    url          : the sidebar URL — used to fetch text if article_text not yet available.
     """
     st.markdown("## 🏷️ Category Extraction & NER Tagging")
     st.markdown(
@@ -743,20 +762,28 @@ def render_category_extractor(article_text: Optional[str] = None):
                 if custom_labels_txt.strip() else None
             )
 
-    # ── Text input ────────────────────────────────────────────────────────────
-    if article_text:
-        text = article_text
-        st.success(f"Using article from URL — {len(text.split()):,} words")
-    else:
-        text = st.text_area(
-            "Or paste article text directly:",
-            height=200,
-            placeholder="Paste article content here if not using a URL above...",
-        )
+    # ── Resolve article text ─────────────────────────────────────────────────
+    text = article_text  # may be None if summarizer hasn't run yet
 
-    if not text or not text.strip():
-        st.info("Extract an article using the URL field above, or paste text here.")
+    if not text and url:
+        # Summarizer hasn't run yet but URL is provided — fetch it now
+        with st.spinner("Fetching article..."):
+            raw = fetch_and_extract(url)
+        if raw:
+            text = clean_text(raw)
+            st.session_state["cat_article_text"] = text
+            st.session_state["cat_article_url"]  = url
+        else:
+            st.warning("Could not extract content from the URL. Try a different article.")
+            return
+    elif not text and "cat_article_text" in st.session_state:
+        text = st.session_state["cat_article_text"]
+
+    if not text:
+        st.info("👆 Paste a URL in the sidebar to get started.")
         return
+
+    st.success(f"Article loaded — {len(text.split()):,} words")
 
     run_any = run_keybert or run_spacy or run_zeroshot or run_kb_gliner
     if not run_any:
@@ -780,22 +807,22 @@ def render_category_extractor(article_text: Optional[str] = None):
 
     if run_keybert:
         with st.spinner("Running KeyBERT..."):
-            r = run_keybert(text, nlp, gliner, top_n=top_n, use_gliner=use_gliner_ner)
+            r = extract_keybert(text, nlp, gliner, top_n=top_n, use_gliner=use_gliner_ner)
             all_results.append(r)
 
     if run_spacy:
         with st.spinner("Running spaCy NER..."):
-            r = run_spacy_ner(text, nlp)
+            r = extract_spacy_ner(text, nlp)
             all_results.append(r)
 
     if run_zeroshot:
         with st.spinner("Running Zero-Shot BART (this takes ~10-30s)..."):
-            r = run_zero_shot(text, nlp, top_n=top_n, custom_labels=custom_labels)
+            r = extract_zero_shot(text, nlp, top_n=top_n, custom_labels=custom_labels)
             all_results.append(r)
 
     if run_kb_gliner:
         with st.spinner("Running KeyBERT + GLiNER..."):
-            r = run_keybert_gliner(text, nlp, top_n=top_n)
+            r = extract_keybert_gliner(text, nlp, top_n=top_n)
             all_results.append(r)
 
     if not all_results:
