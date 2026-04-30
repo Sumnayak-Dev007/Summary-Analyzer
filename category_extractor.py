@@ -3,6 +3,7 @@
 category_extractor.py
 ─────────────────────
 Category extraction using spaCy NER with aggressive filtering.
+Shows raw extracted categories, cleaned categories, and discarded categories.
 """
 
 import os
@@ -80,6 +81,7 @@ class Category:
     source: str = "spacy_ner"
     entity_type: str = "unknown"
     is_clean: bool = True
+    filter_reason: str = ""
 
 
 # ── Filtering functions ───────────────────────────────────────────────────────
@@ -143,7 +145,6 @@ def is_valid_person_name(name: str) -> bool:
         return False
     
     # Person names should have at least first and last name (2+ words)
-    # or be a well-known single name (probable false positive, so require 2+)
     words = name.split()
     if len(words) < 2:
         return False
@@ -241,9 +242,10 @@ def _load_spacy():
 
 # ── NER Extraction with strict filtering ─────────────────────────────────────
 
-def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
+def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category], list[Category], list[Category]]:
     """
-    Extract named entities using spaCy NER with aggressive filtering
+    Extract named entities using spaCy NER with aggressive filtering.
+    Returns: (raw_categories, clean_categories, discarded_categories)
     """
     doc = nlp(cleaned_text[:100000])  # Limit text length
     
@@ -259,37 +261,20 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
     }
     
     seen: dict[str, dict] = {}
+    raw_categories: list[Category] = []
     
+    # First pass: collect all entities (raw extraction)
     for ent in doc.ents:
-        # Skip unwanted entity types
         if ent.label_ not in label_map:
             continue
         
         text = ent.text.strip()
         
-        # Skip short or generic texts
-        if len(text) < 3 or is_too_generic(text):
+        # Skip very short texts
+        if len(text) < 3:
             continue
         
-        # Skip product specifications
-        if is_product_spec(text):
-            continue
-        
-        # Validate based on entity type
         entity_type = label_map[ent.label_]
-        
-        if entity_type == "person":
-            if not is_valid_person_name(text):
-                continue
-        elif entity_type == "organization":
-            if not is_valid_organization(text):
-                continue
-        elif entity_type == "place":
-            if not is_valid_place(text):
-                continue
-        elif entity_type == "product":
-            if not is_valid_product(text):
-                continue
         
         # Count frequencies
         key = text.lower()
@@ -299,12 +284,11 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
         else:
             seen[key]["count"] += 1
     
-    # Convert to Category objects
-    categories = []
+    # Convert to Category objects (raw)
     max_count = max([v["count"] for v in seen.values()]) if seen else 1
     
-    for data in sorted(seen.values(), key=lambda x: -x["count"])[:50]:
-        categories.append(Category(
+    for data in seen.values():
+        raw_categories.append(Category(
             name=data["name"],
             score=round(data["count"] / max_count, 3),
             source="spacy_ner",
@@ -312,7 +296,47 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> list[Category]:
             is_clean=True,
         ))
     
-    return categories
+    # Second pass: filter for quality
+    clean_categories: list[Category] = []
+    discarded_categories: list[Category] = []
+    
+    for cat in raw_categories:
+        filter_reason = None
+        
+        # Check if it's a product spec
+        if is_product_spec(cat.name):
+            filter_reason = "product_specification"
+        # Check if too generic
+        elif is_too_generic(cat.name):
+            filter_reason = "too_generic"
+        # Validate based on entity type
+        elif cat.entity_type == "person":
+            if not is_valid_person_name(cat.name):
+                filter_reason = "invalid_person_name"
+        elif cat.entity_type == "organization":
+            if not is_valid_organization(cat.name):
+                filter_reason = "invalid_organization"
+        elif cat.entity_type == "place":
+            if not is_valid_place(cat.name):
+                filter_reason = "invalid_place"
+        elif cat.entity_type == "product":
+            if not is_valid_product(cat.name):
+                filter_reason = "invalid_product"
+        
+        if filter_reason:
+            cat.is_clean = False
+            cat.filter_reason = filter_reason
+            discarded_categories.append(cat)
+        else:
+            # Only keep person, organization, and place for final display
+            if cat.entity_type in ["person", "organization", "place"]:
+                clean_categories.append(cat)
+            else:
+                cat.is_clean = False
+                cat.filter_reason = f"entity_type_{cat.entity_type}_not_in_required_types"
+                discarded_categories.append(cat)
+    
+    return raw_categories, clean_categories, discarded_categories
 
 
 # ── Main extraction function ─────────────────────────────────────────────────
@@ -329,35 +353,32 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
     nlp = _load_spacy()
     if nlp is None:
         st.error("spaCy model could not be loaded.")
-        return {"categories": [], "elapsed_s": 0, "ram_mb": 0,
-                "n_clean": 0, "n_lq": 0, "n_person": 0,
-                "n_org": 0, "n_place": 0, "n_unknown": 0}
+        return {
+            "raw_categories": [], 
+            "clean_categories": [],
+            "discarded_categories": [],
+            "elapsed_s": 0, 
+            "ram_mb": 0,
+            "n_person": 0,
+            "n_org": 0, 
+            "n_place": 0
+        }
     
     # Extract entities using spaCy NER only
-    categories = extract_entities_with_spacy(cleaned_text, nlp)
+    raw_cats, clean_cats, discarded_cats = extract_entities_with_spacy(cleaned_text, nlp)
     
     elapsed = time.monotonic() - t0
     ram_used = proc.memory_info().rss / 1024 / 1024 - ram0
     
-    return _build_result(categories, round(elapsed, 3), round(ram_used, 1))
-
-
-def _build_result(categories: list, elapsed_s: float, ram_mb: float) -> dict:
-    """Build result dictionary with statistics"""
-    n_clean = len(categories)
-    
     return {
-        "categories": categories,
-        "elapsed_s": elapsed_s,
-        "ram_mb": ram_mb,
-        "n_clean": n_clean,
-        "n_lq": 0,
-        "n_person": sum(1 for c in categories if c.entity_type == "person"),
-        "n_org": sum(1 for c in categories if c.entity_type == "organization"),
-        "n_place": sum(1 for c in categories if c.entity_type == "place"),
-        "n_product": sum(1 for c in categories if c.entity_type == "product"),
-        "n_event": sum(1 for c in categories if c.entity_type == "event"),
-        "n_unknown": sum(1 for c in categories if c.entity_type == "unknown"),
+        "raw_categories": raw_cats,
+        "clean_categories": clean_cats,
+        "discarded_categories": discarded_cats,
+        "elapsed_s": round(elapsed, 3),
+        "ram_mb": round(ram_used, 1),
+        "n_person": sum(1 for c in clean_cats if c.entity_type == "person"),
+        "n_org": sum(1 for c in clean_cats if c.entity_type == "organization"),
+        "n_place": sum(1 for c in clean_cats if c.entity_type == "place"),
     }
 
 
@@ -395,61 +416,39 @@ def _bar(score: float, color: str = "#58a6ff") -> str:
     )
 
 
-def render_cat_results(result: dict):
-    """Render category results in Streamlit UI"""
-    if not result or not result.get("categories"):
-        st.info("No named entities were found in the article.")
+def render_table(categories: list[Category], title: str, show_filter_reason: bool = False):
+    """Render a table of categories"""
+    if not categories:
+        st.info(f"No {title.lower()} to display.")
         return
     
-    # Display metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("⏱️ Time", f"{result['elapsed_s']}s")
-    with col2:
-        st.metric("💾 RAM", f"{result['ram_mb']:.0f} MB")
-    with col3:
-        st.metric("✅ Entities Found", result["n_clean"])
-    with col4:
-        st.metric("📊 Unique Entities", len(result["categories"]))
+    st.markdown(f"### {title}")
     
-    st.markdown("---")
+    entity_color_map = {
+        "person": "#388bfd",
+        "organization": "#3fb950",
+        "place": "#d2a8ff",
+        "product": "#f0883e",
+        "event": "#f85149",
+        "unknown": "#8b949e",
+    }
     
-    # Display categories
-    clean = result["categories"]
-    
-    if clean:
-        # Entity type breakdown
-        type_counts = {
-            "Person": result["n_person"],
-            "Organization": result["n_org"],
-            "Place": result["n_place"],
-            "Product": result.get("n_product", 0),
-            "Event": result.get("n_event", 0),
-        }
+    rows = ""
+    for cat in sorted(categories, key=lambda c: -c.score):
+        clr = entity_color_map.get(cat.entity_type, "#8b949e")
         
-        if any(type_counts.values()):
-            with st.expander("📈 Entity Type Breakdown", expanded=False):
-                import pandas as pd
-                df_counts = pd.DataFrame([
-                    {"Type": k, "Count": v}
-                    for k, v in type_counts.items()
-                    if v > 0
-                ])
-                st.dataframe(df_counts, hide_index=True, use_container_width=True)
-        
-        # Display table
-        entity_color_map = {
-            "person": "#388bfd",
-            "organization": "#3fb950",
-            "place": "#d2a8ff",
-            "product": "#f0883e",
-            "event": "#f85149",
-            "unknown": "#8b949e",
-        }
-        
-        rows = ""
-        for cat in sorted(clean, key=lambda c: -c.score):
-            clr = entity_color_map.get(cat.entity_type, "#8b949e")
+        if show_filter_reason and cat.filter_reason:
+            rows += (
+                f'<tr>'
+                f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
+                f'<td style="padding:7px 12px">{_badge(cat.entity_type)}</td>'
+                f'<td style="padding:7px 12px;color:#8b949e;font-size:12px;'
+                f'font-family:monospace">{cat.source}</td>'
+                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score, clr)}</td>'
+                f'<td style="padding:7px 12px;color:#f85149;font-size:11px">{cat.filter_reason}</td>'
+                f'</tr>'
+            )
+        else:
             rows += (
                 f'<tr>'
                 f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
@@ -459,33 +458,117 @@ def render_cat_results(result: dict):
                 f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score, clr)}</td>'
                 f'</tr>'
             )
-        
-        st.markdown(
-            f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">'
-            f'<thead><tr style="background:#21262d">'
-            f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
-            f'color:#8b949e;font-family:monospace;text-transform:uppercase">Entity</th>'
-            f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
-            f'color:#8b949e;font-family:monospace;text-transform:uppercase">Type</th>'
-            f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
-            f'color:#8b949e;font-family:monospace;text-transform:uppercase">Source</th>'
-            f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
-            f'color:#8b949e;font-family:monospace;text-transform:uppercase">Frequency Score</th>'
-            f'</table></thead><tbody>{rows}</tbody></table>',
-            unsafe_allow_html=True,
-        )
-        
-        # Download button
-        import pandas as pd
-        csv = pd.DataFrame([{
-            "name": c.name,
-            "entity_type": c.entity_type,
-            "frequency_score": c.score,
-        } for c in clean]).to_csv(index=False).encode()
-        st.download_button(
-            "📥 Download entities (CSV)",
-            csv,
-            file_name="named_entities.csv",
-            mime="text/csv",
-            use_container_width=False,
-        )
+    
+    # Build table headers
+    if show_filter_reason:
+        headers = ["Entity", "Type", "Source", "Frequency Score", "Filter Reason"]
+    else:
+        headers = ["Entity", "Type", "Source", "Frequency Score"]
+    
+    header_html = "".join([
+        f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
+        f'color:#8b949e;font-family:monospace;text-transform:uppercase">{h}</th>'
+        for h in headers
+    ])
+    
+    st.markdown(
+        f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">'
+        f'<thead><tr style="background:#21262d">{header_html}</tr></thead>'
+        f'<tbody>{rows}</tbody></table>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_cat_results(result: dict):
+    """Render category results in Streamlit UI"""
+    if not result or not result.get("raw_categories"):
+        st.info("No named entities were found in the article.")
+        return
+    
+    # Display metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("⏱️ Time", f"{result['elapsed_s']}s")
+    with col2:
+        st.metric("💾 RAM", f"{result['ram_mb']:.0f} MB")
+    with col3:
+        st.metric("👤 Persons", result["n_person"])
+    with col4:
+        st.metric("🏢 Organizations", result["n_org"])
+    with col5:
+        st.metric("📍 Places", result["n_place"])
+    
+    st.markdown("---")
+    
+    # Show raw extracted categories
+    with st.expander("📋 Raw Extracted Categories (All Entities)", expanded=False):
+        render_table(result["raw_categories"], "Raw Entities from spaCy NER")
+    
+    st.markdown("---")
+    
+    # Show cleaned categories (only person, organization, place)
+    st.markdown("### ✅ Cleaned & Validated Categories")
+    st.caption("Showing only validated Person, Organization, and Place entities")
+    render_table(result["clean_categories"], "")
+    
+    # Show discarded categories
+    if result["discarded_categories"]:
+        st.markdown("---")
+        with st.expander(f"🚫 Discarded Categories ({len(result['discarded_categories'])} filtered out)", expanded=False):
+            render_table(result["discarded_categories"], "Filtered Out Entities", show_filter_reason=True)
+    
+    # Download buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if result["clean_categories"]:
+            import pandas as pd
+            csv_clean = pd.DataFrame([{
+                "name": c.name,
+                "entity_type": c.entity_type,
+                "source": c.source,
+                "frequency_score": c.score,
+            } for c in result["clean_categories"]]).to_csv(index=False).encode()
+            st.download_button(
+                "📥 Download Clean Categories (CSV)",
+                csv_clean,
+                file_name="clean_categories.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    
+    with col2:
+        if result["raw_categories"]:
+            import pandas as pd
+            csv_raw = pd.DataFrame([{
+                "name": c.name,
+                "entity_type": c.entity_type,
+                "source": c.source,
+                "frequency_score": c.score,
+            } for c in result["raw_categories"]]).to_csv(index=False).encode()
+            st.download_button(
+                "📥 Download Raw Categories (CSV)",
+                csv_raw,
+                file_name="raw_categories.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    
+    with col3:
+        if result["discarded_categories"]:
+            import pandas as pd
+            csv_discarded = pd.DataFrame([{
+                "name": c.name,
+                "entity_type": c.entity_type,
+                "source": c.source,
+                "frequency_score": c.score,
+                "filter_reason": c.filter_reason,
+            } for c in result["discarded_categories"]]).to_csv(index=False).encode()
+            st.download_button(
+                "📥 Download Discarded Categories (CSV)",
+                csv_discarded,
+                file_name="discarded_categories.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
