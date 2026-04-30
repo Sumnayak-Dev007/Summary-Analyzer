@@ -2,8 +2,8 @@
 """
 category_extractor.py
 ─────────────────────
-Category extraction using spaCy NER with precise filtering.
-Shows raw extracted categories, cleaned categories, and discarded categories.
+Category extraction using spaCy NER + Topic Keyword Matching.
+Shows raw extracted categories, cleaned categories (including topic categories), and discarded categories.
 """
 
 import os
@@ -18,6 +18,95 @@ import streamlit as st
 import spacy
 
 
+# ── Topic Categories with Keywords ──────────────────────────────────────────
+
+TOPIC_CATEGORIES = {
+    "SPORTS": {
+        "keywords": [
+            "sport", "sports", "football", "soccer", "cricket", "basketball", 
+            "tennis", "baseball", "olympics", "world cup", "championship", 
+            "tournament", "league", "match", "game", "athlete", "player", 
+            "coach", "team", "goal", "score", "win", "loss", "victory", 
+            "defeat", "champion", "fifa", "uefa", "nba", "nfl", "ipl", 
+            "bcci", "worldcup", "women's world cup", "olympic", "paralympic",
+            "sport and rights alliance"
+        ],
+        "emoji": "⚽"
+    },
+    "POLITICS": {
+        "keywords": [
+            "politics", "political", "government", "election", "vote", 
+            "president", "prime minister", "minister", "parliament", "congress", 
+            "democracy", "republican", "democrat", "party", "policy", "law", 
+            "bill", "act", "constitution", "supreme court", "judge", "campaign",
+            "diplomacy", "foreign policy", "treaty", "alliance", "sanction"
+        ],
+        "emoji": "🏛️"
+    },
+    "TECHNOLOGY": {
+        "keywords": [
+            "technology", "tech", "software", "hardware", "app", "application",
+            "digital", "ai", "artificial intelligence", "machine learning",
+            "data", "algorithm", "computer", "smartphone", "laptop", "tablet",
+            "processor", "chip", "gpu", "cpu", "ram", "storage", "display",
+            "camera", "battery", "charging", "wireless", "bluetooth", "wifi",
+            "5g", "internet", "cloud", "cyber", "security"
+        ],
+        "emoji": "💻"
+    },
+    "BUSINESS": {
+        "keywords": [
+            "business", "company", "corporate", "enterprise", "startup",
+            "market", "stock", "trading", "investment", "finance", "financial",
+            "economy", "economic", "revenue", "profit", "loss", "growth",
+            "merger", "acquisition", "deal", "contract", "partnership",
+            "ceo", "executive", "management"
+        ],
+        "emoji": "📈"
+    },
+    "ENTERTAINMENT": {
+        "keywords": [
+            "entertainment", "movie", "film", "cinema", "hollywood", "bollywood",
+            "actor", "actress", "director", "producer", "celebrity", "star",
+            "music", "song", "album", "concert", "tour", "performance",
+            "tv", "television", "show", "series", "netflix", "amazon prime",
+            "award", "oscar", "grammy", "emmy"
+        ],
+        "emoji": "🎬"
+    },
+    "HEALTH": {
+        "keywords": [
+            "health", "medical", "medicine", "doctor", "hospital", "clinic",
+            "disease", "illness", "treatment", "therapy", "surgery",
+            "vaccine", "covid", "pandemic", "epidemic", "virus", "bacteria",
+            "fitness", "exercise", "wellness", "nutrition", "diet",
+            "mental health", "wellbeing", "care", "patient"
+        ],
+        "emoji": "🏥"
+    },
+    "SCIENCE": {
+        "keywords": [
+            "science", "research", "study", "scientist", "laboratory", "lab",
+            "discovery", "experiment", "data", "analysis", "finding",
+            "space", "astronomy", "physics", "chemistry", "biology",
+            "genetics", "dna", "evolution", "climate", "environment",
+            "sustainability", "renewable", "energy", "nuclear", "quantum"
+        ],
+        "emoji": "🔬"
+    },
+    "ENVIRONMENT": {
+        "keywords": [
+            "environment", "climate", "climate change", "global warming",
+            "sustainability", "renewable", "green", "eco", "ecological",
+            "pollution", "carbon", "emissions", "fossil fuel", "solar",
+            "wind", "hydro", "electric", "conservation", "wildlife",
+            "forest", "ocean", "plastic", "recycling", "waste"
+        ],
+        "emoji": "🌍"
+    }
+}
+
+
 # ── Quality filter constants ──────────────────────────────────────────────────
 
 # Words that indicate junk/non-entities
@@ -30,35 +119,24 @@ JUNK_WORDS = {
 
 # Product specification patterns - ONLY for technical specs
 SPEC_PATTERNS = [
-    # Battery specs (only when clearly a spec)
     r'^\d+\s*(mah|mAh|MAH)$',
     r'^\d+\s*(w|W|watts?|Watts?)$',
     r'\d+\s*mah\s+battery',
-    # Display specs with clear measurements
     r'^\d+(\.\d+)?\s*(inch|"|″)$',
     r'^\d+(k|K)\s*(display|screen)$',
-    # Storage/RAM (single value)
     r'^\d+\s*(gb|GB|tb|TB|mb|MB)$',
     r'^\d+\s*(ram|RAM|rom|ROM)$',
-    # Performance
     r'^\d+\s*(hz|Hz|ghz|GHz|mhz|MHz)$',
     r'^\d+\s*fps$',
-    # Camera specs
     r'^\d+\s*(mp|MP)$',
-    # Units alone
     r'^\d+\s*(nits|Nits)$',
     r'^\d+\s*%$',
-    # Generic numbers with units
     r'^\d+\s*(hrs?|Hrs?)$',
-    # WiFi/Bluetooth (only if just the version)
     r'^wi[-\s]*fi\s*\d+$',
     r'^bluetooth\s*\d+$',
 ]
 
-# Keep these for additional checks but don't over-filter
-TECH_INDICATORS = ['mah', 'gb', 'mb', 'hz', 'fps', 'mp', 'nits', 'ram', 'rom']
-
-# Valid organization names that should never be filtered (common acronyms)
+# Valid organization names that should never be filtered
 VALID_ORGANIZATIONS = {
     "IPL", "BCCI", "ICC", "FIFA", "UEFA", "NBA", "NFL", "MLB", "NHL",
     "NASA", "ISRO", "WHO", "UN", "NATO", "EU", "CWG", "AIIMS", "IIT",
@@ -70,14 +148,8 @@ VALID_PLACES = {
     "Mumbai", "Delhi", "Bangalore", "Chennai", "Kolkata", "Hyderabad",
     "Pune", "Ahmedabad", "Jaipur", "Lucknow", "Kanpur", "Nagpur",
     "Indore", "Thane", "Bhopal", "Visakhapatnam", "Patna", "Vadodara",
-    "Ludhiana", "Agra", "Nashik", "Ranchi", "Gurgaon", "Noida"
-}
-
-# Organization noise patterns (only for clearly non-organization phrases)
-ORG_NOISE = {
-    "adaptive refresh rate", "refresh rate", "display", "chipset",
-    "speaker", "charging", "wireless", "bluetooth",
-    "rating", "certified",
+    "Ludhiana", "Agra", "Nashik", "Ranchi", "Gurgaon", "Noida",
+    "Afghanistan", "Australia", "England", "Brazil"
 }
 
 
@@ -96,27 +168,21 @@ class Category:
 # ── Filtering functions ───────────────────────────────────────────────────────
 
 def is_product_spec(text: str) -> bool:
-    """Check if text looks like a product specification - only obvious technical specs"""
+    """Check if text looks like a product specification"""
     text_stripped = text.strip()
     text_lower = text_stripped.lower()
     
-    # Don't filter out proper names that happen to contain numbers
     if text_stripped[0].isupper() and len(text_stripped) > 2:
-        # Check if it's like "OnePlus 9" (brand + number) - should be kept as product
         if len(text_stripped.split()) >= 2:
-            # Keep product names like "OnePlus 9", "iPhone 12"
             return False
     
-    # Check against spec patterns - must match the whole string approx
     for pattern in SPEC_PATTERNS:
         if re.match(pattern, text_lower, re.IGNORECASE):
             return True
     
-    # Check if it's just a number with unit (no other words)
     if re.match(r'^[\d\.\s]+(mah|gb|mb|hz|fps|mp|nits|w|watts?)$', text_lower):
         return True
     
-    # Check for pure numbers
     if re.match(r'^[\d\s\+\-\(\)\|]+$', text_stripped):
         return True
     
@@ -124,14 +190,12 @@ def is_product_spec(text: str) -> bool:
 
 
 def is_too_generic(text: str) -> bool:
-    """Check if entity name is too generic to be useful"""
+    """Check if entity name is too generic"""
     text_lower = text.lower()
     
-    # Single word generic terms
     if text_lower in JUNK_WORDS:
         return True
     
-    # Very short (likely not meaningful)
     if len(text) <= 2:
         return True
     
@@ -140,28 +204,21 @@ def is_too_generic(text: str) -> bool:
 
 def is_valid_person_name(name: str) -> bool:
     """Validate person name"""
-    # Skip if it's a product spec
     if is_product_spec(name):
         return False
     
-    # Common short names that are valid
-    if name in ["Advani", "Pankaj", "Kothari"]:
+    if name in ["Advani", "Pankaj", "Kothari", "Khalida Popal", "Popal"]:
         return True
     
-    # Skip if it contains numbers
     if re.search(r'\d', name):
         return False
     
-    # Person names should have at least first and last name (2+ words)
-    # Or be a well-known single name
     words = name.split()
     if len(words) == 1:
-        # Single word names are questionable, but allow if proper case and length > 3
         if len(name) > 3 and name[0].isupper():
             return True
         return False
     
-    # Check if words are proper case
     if not any(w[0].isupper() for w in words):
         return False
     
@@ -170,29 +227,18 @@ def is_valid_person_name(name: str) -> bool:
 
 def is_valid_organization(name: str) -> bool:
     """Validate organization name"""
-    # Check if it's in valid organizations list
     name_upper = name.upper()
     if name_upper in VALID_ORGANIZATIONS:
         return True
     
-    # Skip if it's a product spec
     if is_product_spec(name):
         return False
     
-    name_lower = name.lower()
-    
-    # Check for organization indicators
-    org_indicators = ['inc', 'llc', 'ltd', 'corp', 'company', 'group', 'labs', 
-                     'technologies', 'systems', 'solutions', 'corporation']
-    
-    # Organizations often have multiple words or proper case
     words = name.split()
     
-    # Allow acronyms (all caps, 2-5 letters)
     if name.isupper() and 2 <= len(name) <= 5:
         return True
     
-    # Single word organizations
     if len(words) == 1:
         if len(name) >= 3 and name[0].isupper():
             return True
@@ -203,41 +249,58 @@ def is_valid_organization(name: str) -> bool:
 
 def is_valid_place(name: str) -> bool:
     """Validate place/location name"""
-    # Check if it's in valid places list
     if name in VALID_PLACES:
         return True
     
-    # Skip if it's a product spec
     if is_product_spec(name):
         return False
     
-    # Places should be proper nouns
     if not name[0].isupper():
         return False
     
-    # Skip very short
     if len(name) < 3:
         return False
     
     return True
 
 
-def is_valid_product(name: str) -> bool:
-    """Validate product name"""
-    # Skip if it's a spec
-    if is_product_spec(name):
-        return False
+# ── Topic Detection Function ─────────────────────────────────────────────────
+
+def detect_topics(text: str) -> list[Category]:
+    """
+    Detect topic categories by matching keywords in the text.
+    Returns Category objects for each matching topic.
+    """
+    text_lower = text.lower()
+    matched_topics = []
     
-    # Product names should have proper capitalization
-    words = name.split()
+    for topic_name, topic_info in TOPIC_CATEGORIES.items():
+        keywords_matched = 0
+        total_keywords = len(topic_info["keywords"])
+        
+        for keyword in topic_info["keywords"]:
+            if keyword in text_lower:
+                keywords_matched += 1
+        
+        if keywords_matched > 0:
+            # Calculate confidence score based on keyword matches
+            confidence = min(keywords_matched / max(total_keywords, 1) * 2, 1.0)
+            
+            # Create category with topic name and emoji
+            display_name = f"{topic_info['emoji']} {topic_name}"
+            
+            matched_topics.append(Category(
+                name=display_name,
+                score=round(confidence, 3),
+                source="topic_detection",
+                entity_type="topic",
+                is_clean=True
+            ))
     
-    # Skip generic product names
-    generic_products = {'phone', 'tablet', 'laptop', 'device', 'gadget', 
-                       'earbuds', 'speaker', 'watch', 'band', 'charger'}
-    if name.lower() in generic_products:
-        return False
+    # Sort by score descending
+    matched_topics.sort(key=lambda x: -x.score)
     
-    return True
+    return matched_topics
 
 
 # ── Model loader ──────────────────────────────────────────────────────────────
@@ -262,7 +325,7 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
     Extract named entities using spaCy NER with precise filtering.
     Returns: (raw_categories, clean_categories, discarded_categories)
     """
-    doc = nlp(cleaned_text[:100000])  # Limit text length
+    doc = nlp(cleaned_text[:100000])
     
     label_map = {
         "PERSON": "person",
@@ -278,20 +341,16 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
     seen: dict[str, dict] = {}
     raw_categories: list[Category] = []
     
-    # First pass: collect all entities (raw extraction)
     for ent in doc.ents:
         if ent.label_ not in label_map:
             continue
         
         text = ent.text.strip()
         
-        # Skip very short texts
         if len(text) < 2:
             continue
         
         entity_type = label_map[ent.label_]
-        
-        # Count frequencies
         key = text.lower()
         
         if key not in seen:
@@ -299,7 +358,6 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
         else:
             seen[key]["count"] += 1
     
-    # Convert to Category objects (raw)
     max_count = max([v["count"] for v in seen.values()]) if seen else 1
     
     for data in seen.values():
@@ -311,20 +369,17 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
             is_clean=True,
         ))
     
-    # Second pass: filter for quality
+    # Filter for quality
     clean_categories: list[Category] = []
     discarded_categories: list[Category] = []
     
     for cat in raw_categories:
         filter_reason = None
         
-        # Skip product specs entirely
         if is_product_spec(cat.name):
             filter_reason = "product_specification"
-        # Skip overly generic terms
         elif is_too_generic(cat.name):
             filter_reason = "too_generic"
-        # Validate based on entity type
         elif cat.entity_type == "person":
             if not is_valid_person_name(cat.name):
                 filter_reason = "invalid_person_name"
@@ -334,24 +389,13 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
         elif cat.entity_type == "place":
             if not is_valid_place(cat.name):
                 filter_reason = "invalid_place"
-        elif cat.entity_type == "product":
-            if not is_valid_product(cat.name):
-                filter_reason = "invalid_product"
-            else:
-                # Products are allowed in raw but not required for final clean
-                pass
-        elif cat.entity_type == "event":
-            # Events are allowed in raw but not required for final clean
-            pass
         
         if filter_reason:
             cat.is_clean = False
             cat.filter_reason = filter_reason
             discarded_categories.append(cat)
         else:
-            # Keep person, organization, and place for final display
-            # Also keep products if they are valid
-            if cat.entity_type in ["person", "organization", "place", "product"]:
+            if cat.entity_type in ["person", "organization", "place"]:
                 clean_categories.append(cat)
             else:
                 cat.is_clean = False
@@ -365,42 +409,54 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
 
 def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
     """
-    Main extraction function - uses ONLY spaCy NER with precise filtering
+    Main extraction function - extracts named entities AND topic categories
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
     
-    # Load spaCy
+    # Detect topic categories from the article text
+    topic_categories = detect_topics(cleaned_text)
+    
+    # Load spaCy for NER
     nlp = _load_spacy()
     if nlp is None:
         st.error("spaCy model could not be loaded.")
         return {
             "raw_categories": [], 
-            "clean_categories": [],
+            "clean_categories": topic_categories,  # Still show topics even if spaCy fails
             "discarded_categories": [],
             "elapsed_s": 0, 
             "ram_mb": 0,
             "n_person": 0,
             "n_org": 0, 
-            "n_place": 0
+            "n_place": 0,
+            "n_topic": len(topic_categories)
         }
     
-    # Extract entities using spaCy NER only
+    # Extract entities using spaCy NER
     raw_cats, clean_cats, discarded_cats = extract_entities_with_spacy(cleaned_text, nlp)
+    
+    # Merge topic categories with cleaned entities
+    all_clean_categories = clean_cats + topic_categories
+    
+    # Sort by score (topics will have confidence scores, entities have frequency scores)
+    all_clean_categories.sort(key=lambda x: -x.score)
     
     elapsed = time.monotonic() - t0
     ram_used = proc.memory_info().rss / 1024 / 1024 - ram0
     
     return {
         "raw_categories": raw_cats,
-        "clean_categories": clean_cats,
+        "clean_categories": all_clean_categories,
         "discarded_categories": discarded_cats,
+        "topic_categories": topic_categories,  # Keep separate for reference
         "elapsed_s": round(elapsed, 3),
         "ram_mb": round(ram_used, 1),
         "n_person": sum(1 for c in clean_cats if c.entity_type == "person"),
         "n_org": sum(1 for c in clean_cats if c.entity_type == "organization"),
         "n_place": sum(1 for c in clean_cats if c.entity_type == "place"),
+        "n_topic": len(topic_categories)
     }
 
 
@@ -412,12 +468,23 @@ ENTITY_STYLE = {
     "place": "color:#d2a8ff;background:#2d1f5e;border:1px solid #d2a8ff",
     "product": "color:#f0883e;background:#3b2a1a;border:1px solid #f0883e",
     "event": "color:#f85149;background:#3b1a1a;border:1px solid #f85149",
+    "topic": "color:#f0883e;background:#3b2a1a;border:1px solid #f0883e",
     "unknown": "color:#8b949e;background:#1e2128;border:1px solid #30363d",
 }
 
 
 def _badge(entity_type: str) -> str:
     style = ENTITY_STYLE.get(entity_type, ENTITY_STYLE["unknown"])
+    
+    # Custom display for topics
+    if entity_type == "topic":
+        return (
+            f'<span style="{style};padding:2px 8px;border-radius:4px;'
+            f'font-size:11px;font-weight:700;font-family:monospace;'
+            f'letter-spacing:0.06em">'
+            f'TOPIC</span>'
+        )
+    
     return (
         f'<span style="{style};padding:2px 8px;border-radius:4px;'
         f'font-size:11px;font-weight:700;font-family:monospace;'
@@ -452,6 +519,7 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
         "place": "#d2a8ff",
         "product": "#f0883e",
         "event": "#f85149",
+        "topic": "#f0883e",
         "unknown": "#8b949e",
     }
     
@@ -472,7 +540,7 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
             )
         else:
             rows += (
-                f'<tr>'
+                f'<table>'
                 f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
                 f'<td style="padding:7px 12px">{_badge(cat.entity_type)}</td>'
                 f'<td style="padding:7px 12px;color:#8b949e;font-size:12px;'
@@ -481,11 +549,10 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
                 f'</tr>'
             )
     
-    # Build table headers
     if show_filter_reason:
-        headers = ["Entity", "Type", "Source", "Frequency Score", "Filter Reason"]
+        headers = ["Entity", "Type", "Source", "Score", "Filter Reason"]
     else:
-        headers = ["Entity", "Type", "Source", "Frequency Score"]
+        headers = ["Entity", "Type", "Source", "Score"]
     
     header_html = "".join([
         f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
@@ -496,19 +563,19 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     st.markdown(
         f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">'
         f'<thead><tr style="background:#21262d">{header_html}</tr></thead>'
-        f'<tbody>{rows}</tbody><table>',
+        f'<tbody>{rows}</tbody></table>',
         unsafe_allow_html=True,
     )
 
 
 def render_cat_results(result: dict):
     """Render category results in Streamlit UI"""
-    if not result or not result.get("raw_categories"):
-        st.info("No named entities were found in the article.")
+    if not result or (not result.get("raw_categories") and not result.get("topic_categories")):
+        st.info("No categories or topics were found in the article.")
         return
     
     # Display metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
         st.metric("⏱️ Time", f"{result['elapsed_s']}s")
     with col2:
@@ -519,24 +586,26 @@ def render_cat_results(result: dict):
         st.metric("🏢 Organizations", result["n_org"])
     with col5:
         st.metric("📍 Places", result["n_place"])
+    with col6:
+        st.metric("🏷️ Topics", result.get("n_topic", 0))
     
     st.markdown("---")
     
     # Show raw extracted categories
-    with st.expander("📋 Raw Extracted Categories (All Entities)", expanded=False):
-        render_table(result["raw_categories"], "Raw Entities from spaCy NER")
+    if result.get("raw_categories"):
+        with st.expander("📋 Raw Extracted Entities (All Entities)", expanded=False):
+            render_table(result["raw_categories"], "Raw Entities from spaCy NER")
+        st.markdown("---")
     
-    st.markdown("---")
-    
-    # Show cleaned categories (only person, organization, place)
+    # Show cleaned categories (entities + topics)
     st.markdown("### ✅ Cleaned & Validated Categories")
-    st.caption("Showing validated Person, Organization, and Place entities")
+    st.caption("Named entities (People, Organizations, Places) + Detected Topics")
     render_table(result["clean_categories"], "")
     
     # Show discarded categories
-    if result["discarded_categories"]:
+    if result.get("discarded_categories"):
         st.markdown("---")
-        with st.expander(f"🚫 Discarded Categories ({len(result['discarded_categories'])} filtered out)", expanded=False):
+        with st.expander(f"🚫 Discarded Entities ({len(result['discarded_categories'])} filtered out)", expanded=False):
             render_table(result["discarded_categories"], "Filtered Out Entities", show_filter_reason=True)
     
     # Download buttons
@@ -550,47 +619,47 @@ def render_cat_results(result: dict):
                 "name": c.name,
                 "entity_type": c.entity_type,
                 "source": c.source,
-                "frequency_score": c.score,
+                "score": c.score,
             } for c in result["clean_categories"]]).to_csv(index=False).encode()
             st.download_button(
-                "📥 Download Clean Categories (CSV)",
+                "📥 Download All Categories (CSV)",
                 csv_clean,
-                file_name="clean_categories.csv",
+                file_name="all_categories.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
     
     with col2:
-        if result["raw_categories"]:
+        if result.get("raw_categories"):
             import pandas as pd
             csv_raw = pd.DataFrame([{
                 "name": c.name,
                 "entity_type": c.entity_type,
                 "source": c.source,
-                "frequency_score": c.score,
+                "score": c.score,
             } for c in result["raw_categories"]]).to_csv(index=False).encode()
             st.download_button(
-                "📥 Download Raw Categories (CSV)",
+                "📥 Download Raw Entities (CSV)",
                 csv_raw,
-                file_name="raw_categories.csv",
+                file_name="raw_entities.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
     
     with col3:
-        if result["discarded_categories"]:
+        if result.get("discarded_categories"):
             import pandas as pd
             csv_discarded = pd.DataFrame([{
                 "name": c.name,
                 "entity_type": c.entity_type,
                 "source": c.source,
-                "frequency_score": c.score,
+                "score": c.score,
                 "filter_reason": c.filter_reason,
             } for c in result["discarded_categories"]]).to_csv(index=False).encode()
             st.download_button(
-                "📥 Download Discarded Categories (CSV)",
+                "📥 Download Discarded Entities (CSV)",
                 csv_discarded,
-                file_name="discarded_categories.csv",
+                file_name="discarded_entities.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
