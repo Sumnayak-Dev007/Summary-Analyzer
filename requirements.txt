@@ -11,5 +11,7 @@ transformers
 torch
 sentencepiece
 numpy
+pandas
 psutil
 requests
+keybert

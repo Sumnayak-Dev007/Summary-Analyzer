@@ -23,7 +23,7 @@ from transformers import (
     BartForConditionalGeneration, BartTokenizer,
     T5ForConditionalGeneration, T5Tokenizer
 )
-
+from category_extractor import render_category_extractor
 
 st.set_page_config(
     page_title  = "Summary Comparator",
@@ -516,3 +516,10 @@ if run_button and url:
 
 elif run_button and not url:
     st.warning("Please enter a URL first")
+
+st.divider()
+st.header("Category Extraction & NER Tagging")
+if 'cleaned' in dir() and cleaned:
+    render_category_extractor(article_text=cleaned)
+else:
+    render_category_extractor(article_text=None)
