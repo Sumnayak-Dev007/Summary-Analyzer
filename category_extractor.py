@@ -345,14 +345,17 @@ def _gliner_classify(categories: list[Category], gliner, threshold: float = 0.55
 
 def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
     """
-    Full extraction pipeline:
-      1. trafilatura keyword extraction (fast, no ML model)
-      2. spaCy NER extraction
-      3. Merge and deduplicate
-      4. spaCy quality filter on all candidates
-      5. GLiNER NER re-classification on clean candidates
+    Two-stage pipeline so categories appear on screen immediately:
 
-    Returns a dict ready for render_cat_results().
+    Stage 1 (fast — no heavy models):
+      - trafilatura keyword extraction
+      - spaCy NER (already loaded for summarization)
+      - spaCy quality filter
+      Shows results immediately.
+
+    Stage 2 (slow — GLiNER):
+      - Re-classifies entity types on clean categories
+      - Updates results in place
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
@@ -367,44 +370,54 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
                 "n_clean": 0, "n_lq": 0, "n_person": 0,
                 "n_org": 0, "n_place": 0, "n_unknown": 0}
 
-    with st.spinner("Loading GLiNER..."):
-        gliner = _load_gliner()
+    # Stage 1 — extract and filter without GLiNER
+    with st.spinner("Extracting categories..."):
+        traf_cats  = _extract_from_trafilatura(raw_html, cleaned_text)
+        spacy_cats = _extract_spacy_ner(cleaned_text, nlp)
 
-    # Step 1: extract candidates from two sources
-    traf_cats  = _extract_from_trafilatura(raw_html, cleaned_text)
-    spacy_cats = _extract_spacy_ner(cleaned_text, nlp)
+        seen_names: set[str] = set()
+        merged: list[Category] = []
+        for cat in traf_cats + spacy_cats:
+            key = cat.name.strip().lower()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                merged.append(cat)
 
-    # Step 2: merge, deduplicate by lowercase name
-    seen_names: set[str] = set()
-    merged: list[Category] = []
-    for cat in traf_cats + spacy_cats:
-        key = cat.name.strip().lower()
-        if key and key not in seen_names:
-            seen_names.add(key)
-            merged.append(cat)
+        filtered = _quality_filter(merged, nlp)
 
-    # Step 3: quality filter
-    filtered = _quality_filter(merged, nlp)
+    stage1_elapsed = time.monotonic() - t0
 
-    # Step 4: GLiNER NER classification
-    classified = _gliner_classify(filtered, gliner)
+    # Show stage 1 results immediately to the user
+    result = _build_result(filtered, stage1_elapsed,
+                           proc.memory_info().rss / 1024 / 1024 - ram0)
+    st.session_state["cat_result"] = result
+    render_cat_results(result)
+
+    # Stage 2 — GLiNER re-classification (shown as update below the table)
+    with st.spinner("Running GLiNER NER classification..."):
+        gliner     = _load_gliner()
+        classified = _gliner_classify(filtered, gliner)
 
     elapsed  = time.monotonic() - t0
     ram_used = proc.memory_info().rss / 1024 / 1024 - ram0
 
-    n_clean  = sum(1 for c in classified if c.is_clean)
-    n_lq     = sum(1 for c in classified if not c.is_clean)
+    # Return final result with GLiNER classifications
+    return _build_result(classified, round(elapsed, 3), round(ram_used, 1))
 
+
+def _build_result(categories: list, elapsed_s: float, ram_mb: float) -> dict:
+    n_clean = sum(1 for c in categories if c.is_clean)
+    n_lq    = sum(1 for c in categories if not c.is_clean)
     return {
-        "categories": classified,
-        "elapsed_s":  round(elapsed, 3),
-        "ram_mb":     round(ram_used, 1),
+        "categories": categories,
+        "elapsed_s":  round(elapsed_s, 3),
+        "ram_mb":     round(ram_mb, 1),
         "n_clean":    n_clean,
         "n_lq":       n_lq,
-        "n_person":   sum(1 for c in classified if c.is_clean and c.entity_type == "person"),
-        "n_org":      sum(1 for c in classified if c.is_clean and c.entity_type == "organization"),
-        "n_place":    sum(1 for c in classified if c.is_clean and c.entity_type == "place"),
-        "n_unknown":  sum(1 for c in classified if c.is_clean and c.entity_type == "unknown"),
+        "n_person":   sum(1 for c in categories if c.is_clean and c.entity_type == "person"),
+        "n_org":      sum(1 for c in categories if c.is_clean and c.entity_type == "organization"),
+        "n_place":    sum(1 for c in categories if c.is_clean and c.entity_type == "place"),
+        "n_unknown":  sum(1 for c in categories if c.is_clean and c.entity_type == "unknown"),
     }
 
 
