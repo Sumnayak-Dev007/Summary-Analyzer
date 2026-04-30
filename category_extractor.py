@@ -30,8 +30,7 @@ TOPIC_CATEGORIES = {
             "defeat", "champion", "fifa", "uefa", "nba", "nfl", "ipl", 
             "bcci", "worldcup", "women's world cup", "olympic", "paralympic",
             "sport and rights alliance"
-        ],
-        "emoji": "⚽"
+        ]
     },
     "POLITICS": {
         "keywords": [
@@ -40,8 +39,7 @@ TOPIC_CATEGORIES = {
             "democracy", "republican", "democrat", "party", "policy", "law", 
             "bill", "act", "constitution", "supreme court", "judge", "campaign",
             "diplomacy", "foreign policy", "treaty", "alliance", "sanction"
-        ],
-        "emoji": "🏛️"
+        ]
     },
     "TECHNOLOGY": {
         "keywords": [
@@ -51,8 +49,7 @@ TOPIC_CATEGORIES = {
             "processor", "chip", "gpu", "cpu", "ram", "storage", "display",
             "camera", "battery", "charging", "wireless", "bluetooth", "wifi",
             "5g", "internet", "cloud", "cyber", "security"
-        ],
-        "emoji": "💻"
+        ]
     },
     "BUSINESS": {
         "keywords": [
@@ -61,8 +58,7 @@ TOPIC_CATEGORIES = {
             "economy", "economic", "revenue", "profit", "loss", "growth",
             "merger", "acquisition", "deal", "contract", "partnership",
             "ceo", "executive", "management"
-        ],
-        "emoji": "📈"
+        ]
     },
     "ENTERTAINMENT": {
         "keywords": [
@@ -71,8 +67,7 @@ TOPIC_CATEGORIES = {
             "music", "song", "album", "concert", "tour", "performance",
             "tv", "television", "show", "series", "netflix", "amazon prime",
             "award", "oscar", "grammy", "emmy"
-        ],
-        "emoji": "🎬"
+        ]
     },
     "HEALTH": {
         "keywords": [
@@ -81,8 +76,7 @@ TOPIC_CATEGORIES = {
             "vaccine", "covid", "pandemic", "epidemic", "virus", "bacteria",
             "fitness", "exercise", "wellness", "nutrition", "diet",
             "mental health", "wellbeing", "care", "patient"
-        ],
-        "emoji": "🏥"
+        ]
     },
     "SCIENCE": {
         "keywords": [
@@ -91,8 +85,7 @@ TOPIC_CATEGORIES = {
             "space", "astronomy", "physics", "chemistry", "biology",
             "genetics", "dna", "evolution", "climate", "environment",
             "sustainability", "renewable", "energy", "nuclear", "quantum"
-        ],
-        "emoji": "🔬"
+        ]
     },
     "ENVIRONMENT": {
         "keywords": [
@@ -101,8 +94,7 @@ TOPIC_CATEGORIES = {
             "pollution", "carbon", "emissions", "fossil fuel", "solar",
             "wind", "hydro", "electric", "conservation", "wildlife",
             "forest", "ocean", "plastic", "recycling", "waste"
-        ],
-        "emoji": "🌍"
+        ]
     }
 }
 
@@ -160,7 +152,7 @@ class Category:
     name: str
     score: float = 0.0
     source: str = "spacy_ner"
-    entity_type: str = "unknown"
+    entity_type: str = ""
     is_clean: bool = True
     filter_reason: str = ""
 
@@ -276,7 +268,6 @@ def detect_topics(text: str) -> list[Category]:
     
     for topic_name, topic_info in TOPIC_CATEGORIES.items():
         keywords_matched = 0
-        total_keywords = len(topic_info["keywords"])
         
         for keyword in topic_info["keywords"]:
             if keyword in text_lower:
@@ -284,16 +275,13 @@ def detect_topics(text: str) -> list[Category]:
         
         if keywords_matched > 0:
             # Calculate confidence score based on keyword matches
-            confidence = min(keywords_matched / max(total_keywords, 1) * 2, 1.0)
-            
-            # Create category with topic name and emoji
-            display_name = f"{topic_info['emoji']} {topic_name}"
+            confidence = min(keywords_matched / 10, 1.0)
             
             matched_topics.append(Category(
-                name=display_name,
+                name=topic_name,
                 score=round(confidence, 3),
                 source="topic_detection",
-                entity_type="topic",
+                entity_type="",
                 is_clean=True
             ))
     
@@ -383,24 +371,35 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
         elif cat.entity_type == "person":
             if not is_valid_person_name(cat.name):
                 filter_reason = "invalid_person_name"
+            else:
+                clean_categories.append(cat)
+                continue
         elif cat.entity_type == "organization":
             if not is_valid_organization(cat.name):
                 filter_reason = "invalid_organization"
+            else:
+                clean_categories.append(cat)
+                continue
         elif cat.entity_type == "place":
             if not is_valid_place(cat.name):
                 filter_reason = "invalid_place"
+            else:
+                clean_categories.append(cat)
+                continue
+        elif cat.entity_type == "event":
+            # Keep events as valid categories
+            clean_categories.append(cat)
+            continue
+        else:
+            # For other types, keep them but with empty entity_type
+            cat.entity_type = ""
+            clean_categories.append(cat)
+            continue
         
         if filter_reason:
             cat.is_clean = False
             cat.filter_reason = filter_reason
             discarded_categories.append(cat)
-        else:
-            if cat.entity_type in ["person", "organization", "place"]:
-                clean_categories.append(cat)
-            else:
-                cat.is_clean = False
-                cat.filter_reason = f"entity_type_{cat.entity_type}_not_in_required_types"
-                discarded_categories.append(cat)
     
     return raw_categories, clean_categories, discarded_categories
 
@@ -424,7 +423,7 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
         st.error("spaCy model could not be loaded.")
         return {
             "raw_categories": [], 
-            "clean_categories": topic_categories,  # Still show topics even if spaCy fails
+            "clean_categories": topic_categories,
             "discarded_categories": [],
             "elapsed_s": 0, 
             "ram_mb": 0,
@@ -440,7 +439,7 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
     # Merge topic categories with cleaned entities
     all_clean_categories = clean_cats + topic_categories
     
-    # Sort by score (topics will have confidence scores, entities have frequency scores)
+    # Sort by score descending
     all_clean_categories.sort(key=lambda x: -x.score)
     
     elapsed = time.monotonic() - t0
@@ -450,7 +449,6 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
         "raw_categories": raw_cats,
         "clean_categories": all_clean_categories,
         "discarded_categories": discarded_cats,
-        "topic_categories": topic_categories,  # Keep separate for reference
         "elapsed_s": round(elapsed, 3),
         "ram_mb": round(ram_used, 1),
         "n_person": sum(1 for c in clean_cats if c.entity_type == "person"),
@@ -462,46 +460,16 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str] = None) -> dict:
 
 # ── Rendering functions ───────────────────────────────────────────────────────
 
-ENTITY_STYLE = {
-    "person": "color:#388bfd;background:#1c3a6b;border:1px solid #388bfd",
-    "organization": "color:#3fb950;background:#1a3a22;border:1px solid #3fb950",
-    "place": "color:#d2a8ff;background:#2d1f5e;border:1px solid #d2a8ff",
-    "product": "color:#f0883e;background:#3b2a1a;border:1px solid #f0883e",
-    "event": "color:#f85149;background:#3b1a1a;border:1px solid #f85149",
-    "topic": "color:#f0883e;background:#3b2a1a;border:1px solid #f0883e",
-    "unknown": "color:#8b949e;background:#1e2128;border:1px solid #30363d",
-}
-
-
-def _badge(entity_type: str) -> str:
-    style = ENTITY_STYLE.get(entity_type, ENTITY_STYLE["unknown"])
-    
-    # Custom display for topics
-    if entity_type == "topic":
-        return (
-            f'<span style="{style};padding:2px 8px;border-radius:4px;'
-            f'font-size:11px;font-weight:700;font-family:monospace;'
-            f'letter-spacing:0.06em">'
-            f'TOPIC</span>'
-        )
-    
-    return (
-        f'<span style="{style};padding:2px 8px;border-radius:4px;'
-        f'font-size:11px;font-weight:700;font-family:monospace;'
-        f'letter-spacing:0.06em">'
-        f'{entity_type.upper()}</span>'
-    )
-
-
-def _bar(score: float, color: str = "#58a6ff") -> str:
+def _bar(score: float) -> str:
+    """Create a simple progress bar for scores"""
     pct = int(score * 100)
     return (
         f'<div style="display:flex;align-items:center;gap:8px">'
-        f'<div style="flex:1;background:#21262d;border-radius:3px;height:5px">'
-        f'<div style="width:{pct}%;background:{color};height:5px;border-radius:3px"></div>'
+        f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
+        f'<div style="width:{pct}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
         f'</div>'
-        f'<span style="font-family:monospace;font-size:11px;color:#8b949e;'
-        f'min-width:34px">{score:.2f}</span></div>'
+        f'<span style="font-family:monospace;font-size:11px;color:#666">{score:.2f}</span>'
+        f'</div>'
     )
 
 
@@ -513,39 +481,25 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     
     st.markdown(f"### {title}")
     
-    entity_color_map = {
-        "person": "#388bfd",
-        "organization": "#3fb950",
-        "place": "#d2a8ff",
-        "product": "#f0883e",
-        "event": "#f85149",
-        "topic": "#f0883e",
-        "unknown": "#8b949e",
-    }
-    
     rows = ""
     for cat in sorted(categories, key=lambda c: -c.score):
-        clr = entity_color_map.get(cat.entity_type, "#8b949e")
-        
         if show_filter_reason and cat.filter_reason:
             rows += (
                 f'<tr>'
-                f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
-                f'<td style="padding:7px 12px">{_badge(cat.entity_type)}</td>'
-                f'<td style="padding:7px 12px;color:#8b949e;font-size:12px;'
-                f'font-family:monospace">{cat.source}</td>'
-                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score, clr)}</td>'
-                f'<td style="padding:7px 12px;color:#f85149;font-size:11px">{cat.filter_reason}</td>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.name}</td>'
+                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
+                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.source}</td>'
+                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score)}</td>'
+                f'<td style="padding:7px 12px;font-size:11px;color:#999">{cat.filter_reason}</td>'
                 f'</tr>'
             )
         else:
             rows += (
-                f'<table>'
-                f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
-                f'<td style="padding:7px 12px">{_badge(cat.entity_type)}</td>'
-                f'<td style="padding:7px 12px;color:#8b949e;font-size:12px;'
-                f'font-family:monospace">{cat.source}</td>'
-                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score, clr)}</td>'
+                f'<tr>'
+                f'<td style="padding:7px 12px;font-size:13px">{cat.name}</td>'
+                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.entity_type if cat.entity_type else "-"}</td>'
+                f'<td style="padding:7px 12px;font-size:12px;color:#666">{cat.source}</td>'
+                f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score)}</td>'
                 f'</tr>'
             )
     
@@ -556,13 +510,13 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     
     header_html = "".join([
         f'<th style="padding:8px 12px;text-align:left;font-size:11px;'
-        f'color:#8b949e;font-family:monospace;text-transform:uppercase">{h}</th>'
+        f'color:#666;font-family:monospace;text-transform:uppercase">{h}</th>'
         for h in headers
     ])
     
     st.markdown(
-        f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">'
-        f'<thead><tr style="background:#21262d">{header_html}</tr></thead>'
+        f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;border:1px solid #ddd">'
+        f'<thead><tr style="background:#f5f5f5">{header_html}</tr></thead>'
         f'<tbody>{rows}</tbody></table>',
         unsafe_allow_html=True,
     )
@@ -570,42 +524,40 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
 
 def render_cat_results(result: dict):
     """Render category results in Streamlit UI"""
-    if not result or (not result.get("raw_categories") and not result.get("topic_categories")):
+    if not result or (not result.get("raw_categories") and not result.get("clean_categories")):
         st.info("No categories or topics were found in the article.")
         return
     
     # Display metrics
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        st.metric("⏱️ Time", f"{result['elapsed_s']}s")
+        st.metric("Time", f"{result['elapsed_s']}s")
     with col2:
-        st.metric("💾 RAM", f"{result['ram_mb']:.0f} MB")
+        st.metric("RAM", f"{result['ram_mb']:.0f} MB")
     with col3:
-        st.metric("👤 Persons", result["n_person"])
+        st.metric("Persons", result["n_person"])
     with col4:
-        st.metric("🏢 Organizations", result["n_org"])
+        st.metric("Organizations", result["n_org"])
     with col5:
-        st.metric("📍 Places", result["n_place"])
+        st.metric("Places", result["n_place"])
     with col6:
-        st.metric("🏷️ Topics", result.get("n_topic", 0))
+        st.metric("Topics", result.get("n_topic", 0))
     
     st.markdown("---")
     
     # Show raw extracted categories
     if result.get("raw_categories"):
-        with st.expander("📋 Raw Extracted Entities (All Entities)", expanded=False):
+        with st.expander("Raw Extracted Entities (All Entities)", expanded=False):
             render_table(result["raw_categories"], "Raw Entities from spaCy NER")
-        st.markdown("---")
     
     # Show cleaned categories (entities + topics)
-    st.markdown("### ✅ Cleaned & Validated Categories")
-    st.caption("Named entities (People, Organizations, Places) + Detected Topics")
+    st.markdown("### Cleaned & Validated Categories")
+    st.caption("Named entities + Detected Topics")
     render_table(result["clean_categories"], "")
     
     # Show discarded categories
     if result.get("discarded_categories"):
-        st.markdown("---")
-        with st.expander(f"🚫 Discarded Entities ({len(result['discarded_categories'])} filtered out)", expanded=False):
+        with st.expander(f"Discarded Entities ({len(result['discarded_categories'])} filtered out)", expanded=False):
             render_table(result["discarded_categories"], "Filtered Out Entities", show_filter_reason=True)
     
     # Download buttons
@@ -617,12 +569,12 @@ def render_cat_results(result: dict):
             import pandas as pd
             csv_clean = pd.DataFrame([{
                 "name": c.name,
-                "entity_type": c.entity_type,
+                "entity_type": c.entity_type if c.entity_type else "",
                 "source": c.source,
                 "score": c.score,
             } for c in result["clean_categories"]]).to_csv(index=False).encode()
             st.download_button(
-                "📥 Download All Categories (CSV)",
+                "Download All Categories (CSV)",
                 csv_clean,
                 file_name="all_categories.csv",
                 mime="text/csv",
@@ -634,12 +586,12 @@ def render_cat_results(result: dict):
             import pandas as pd
             csv_raw = pd.DataFrame([{
                 "name": c.name,
-                "entity_type": c.entity_type,
+                "entity_type": c.entity_type if c.entity_type else "",
                 "source": c.source,
                 "score": c.score,
             } for c in result["raw_categories"]]).to_csv(index=False).encode()
             st.download_button(
-                "📥 Download Raw Entities (CSV)",
+                "Download Raw Entities (CSV)",
                 csv_raw,
                 file_name="raw_entities.csv",
                 mime="text/csv",
@@ -651,13 +603,13 @@ def render_cat_results(result: dict):
             import pandas as pd
             csv_discarded = pd.DataFrame([{
                 "name": c.name,
-                "entity_type": c.entity_type,
+                "entity_type": c.entity_type if c.entity_type else "",
                 "source": c.source,
                 "score": c.score,
                 "filter_reason": c.filter_reason,
             } for c in result["discarded_categories"]]).to_csv(index=False).encode()
             st.download_button(
-                "📥 Download Discarded Entities (CSV)",
+                "Download Discarded Entities (CSV)",
                 csv_discarded,
                 file_name="discarded_entities.csv",
                 mime="text/csv",
