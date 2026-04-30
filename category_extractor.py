@@ -3,26 +3,18 @@
 category_extractor.py
 ─────────────────────
 Category extraction using trafilatura keyword extraction,
-then spaCy + GLiNER for quality filtering and NER classification.
+then spaCy for quality filtering and NER classification.
 """
 
 import os
 import re
 import time
-from collections import defaultdict
+from collections import defaultdict, Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import psutil
 import streamlit as st
-
-# ── Model cache dirs ──────────────────────────────────────────────────────────
-
-MODELS_DIR      = Path(os.environ.get("MODELS_DIR", Path(__file__).parent / "models"))
-HF_CACHE_DIR    = MODELS_DIR / "huggingface"
-SPACY_MODEL_ID  = "en_core_web_lg"
-GLINER_MODEL_ID = "urchade/gliner_medium-v2.1"
 
 
 # ── Quality filter constants ──────────────────────────────────────────────────
@@ -109,7 +101,7 @@ def _quality_reasons(name: str, doc) -> list[str]:
     if _is_non_ascii(name):                                     r.append("non_english")
     if name.strip().lower() in JUNK_STANDALONE:                 r.append("junk_standalone")
     tokens = [t.text.lower() for t in doc if not t.is_punct and not t.is_space]
-    if tokens and all(t in NOISE_VERBS for t in tokens):       r.append("all_verb_tokens")
+    if tokens and all(t in NOISE_VERBS for t in tokens):        r.append("all_verb_tokens")
     if _is_verb_heavy(doc):                                     r.append("verb_heavy")
     if re.match(r"^(how|why|when|what|who|where)\b", name.strip(), re.I):
                                                                 r.append("question_prefix")
@@ -140,54 +132,20 @@ def _is_org(name: str) -> bool:
     )
 
 
-# ── Model paths ──────────────────────────────────────────────────────────────
-
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-GLINER_PATH     = os.path.join(BASE_DIR, "local-models", "gliner-medium-v2.1")
-
-
-# ── Model loaders ───────────────────────────────────────────────
+# ── Model loaders ─────────────────────────────────────────────────────────────
 
 @st.cache_resource
 def _load_spacy():
     import spacy
     # Try to load the model that should be installed
-    try:
-        nlp = spacy.load("en_core_web_lg")
-        # Add textrank pipe if not already present
-        if "textrank" not in nlp.pipe_names:
-            nlp.add_pipe("textrank")
-        return nlp
-    except OSError:
-        # Fallback to smaller models
-        for model_id in ["en_core_web_md", "en_core_web_sm"]:
-            try:
-                nlp = spacy.load(model_id)
-                if "textrank" not in nlp.pipe_names:
-                    nlp.add_pipe("textrank")
-                return nlp
-            except OSError:
-                continue
+    for model_id in ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"]:
+        try:
+            nlp = spacy.load(model_id)
+            return nlp
+        except OSError:
+            continue
     st.error("No spaCy model found. Please ensure en_core_web_lg is installed.")
     return None
-
-
-@st.cache_resource
-def _load_gliner():
-    from gliner import GLiNER
-    if not os.path.exists(GLINER_PATH):
-        os.makedirs(GLINER_PATH, exist_ok=True)
-        try:
-            model = GLiNER.from_pretrained(GLINER_MODEL_ID)
-            model.save_pretrained(GLINER_PATH)
-        except Exception as e:
-            st.warning(f"Could not download GLiNER model: {e}")
-            return None
-    try:
-        return GLiNER.from_pretrained(GLINER_PATH)
-    except Exception as e:
-        st.warning(f"Could not load GLiNER model: {e}")
-        return None
 
 
 # ── Category extraction ───────────────────────────────────────────────────────
@@ -283,73 +241,50 @@ def _extract_spacy_ner(cleaned_text: str, nlp) -> list[Category]:
 def _quality_filter(categories: list[Category], nlp) -> list[Category]:
     """
     Runs spaCy quality filter on every category.
+    Also classifies entity types for categories without them.
     """
-    from collections import Counter
     label_map = {
         "PERSON": "person", "ORG": "organization",
         "GPE": "place", "LOC": "place", "FAC": "place", "NORP": "organization",
     }
+    
+    # Process in batches for efficiency
     names = [c.name for c in categories]
-    docs  = list(nlp.pipe(names))
-    out   = []
+    docs = list(nlp.pipe(names))
+    
+    out = []
     for cat, doc in zip(categories, docs):
+        # Check quality
         reasons = _quality_reasons(cat.name, doc)
         if reasons:
-            cat.is_clean   = False
+            cat.is_clean = False
             cat.lq_reasons = reasons
             out.append(cat)
             continue
+        
+        # If no entity type yet, try to classify
         if cat.entity_type == "unknown":
+            # First check spaCy entities in the phrase itself
             spacy_ents = [(e.label_, e.text) for e in doc.ents]
             if spacy_ents:
                 mapped = [label_map.get(l, "unknown") for l, _ in spacy_ents]
                 cat.entity_type = Counter(mapped).most_common(1)[0][0]
+            # Then try heuristic classification
             elif _validate_person(cat.name):
                 cat.entity_type = "person"
             elif _is_org(cat.name):
                 cat.entity_type = "organization"
+        
         out.append(cat)
+    
     return out
-
-
-def _gliner_classify(categories: list[Category], gliner, threshold: float = 0.55) -> list[Category]:
-    """
-    Re-classifies entity type of clean categories using GLiNER.
-    """
-    clean = [c for c in categories if c.is_clean]
-    if not clean or gliner is None:
-        return categories
-    label_map = {
-        "person": "person", "organization": "organization",
-        "location": "place", "city": "place", "country": "place",
-    }
-    names = [c.name for c in clean]
-    try:
-        all_ents = gliner.batch_predict_entities(
-            names,
-            labels=["Person","Organization","Location","City","Country",
-                    "Profession","Occupation"],
-            threshold=threshold,
-        )
-    except Exception:
-        return categories
-    for cat, entities in zip(clean, all_ents):
-        if not entities:
-            continue
-        scores: dict[str, float] = defaultdict(float)
-        for e in entities:
-            mapped = label_map.get(e.get("label","").lower(), "unknown")
-            scores[mapped] += float(e.get("score", 0))
-        if scores:
-            cat.entity_type = max(scores, key=scores.__getitem__)
-    return categories
 
 
 # ── Main extraction function (called from app.py) ─────────────────────────────
 
 def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
     """
-    Run the full category extraction pipeline.
+    Run the full category extraction pipeline using only spaCy.
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
@@ -363,28 +298,32 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
                 "n_clean": 0, "n_lq": 0, "n_person": 0,
                 "n_org": 0, "n_place": 0, "n_unknown": 0}
 
-    # Extract categories
-    traf_cats  = _extract_from_trafilatura(raw_html, cleaned_text)
+    # Extract categories from both sources
+    traf_cats = _extract_from_trafilatura(raw_html, cleaned_text)
     spacy_cats = _extract_spacy_ner(cleaned_text, nlp)
 
-    # Merge and deduplicate
+    # Merge and deduplicate (prioritize spaCy when there's a conflict)
     seen_names: set[str] = set()
     merged: list[Category] = []
-    for cat in traf_cats + spacy_cats:
+    
+    # Add spaCy categories first (they have entity types)
+    for cat in spacy_cats:
+        key = cat.name.strip().lower()
+        if key and key not in seen_names:
+            seen_names.add(key)
+            merged.append(cat)
+    
+    # Add trafilatura categories that aren't duplicates
+    for cat in traf_cats:
         key = cat.name.strip().lower()
         if key and key not in seen_names:
             seen_names.add(key)
             merged.append(cat)
 
-    # Quality filter
+    # Apply quality filtering and entity classification
     filtered = _quality_filter(merged, nlp)
 
-    # GLiNER classification (optional)
-    gliner = _load_gliner()
-    if gliner:
-        filtered = _gliner_classify(filtered, gliner)
-
-    elapsed  = time.monotonic() - t0
+    elapsed = time.monotonic() - t0
     ram_used = proc.memory_info().rss / 1024 / 1024 - ram0
 
     # Build and return result
@@ -393,17 +332,17 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
 
 def _build_result(categories: list, elapsed_s: float, ram_mb: float) -> dict:
     n_clean = sum(1 for c in categories if c.is_clean)
-    n_lq    = sum(1 for c in categories if not c.is_clean)
+    n_lq = sum(1 for c in categories if not c.is_clean)
     return {
         "categories": categories,
-        "elapsed_s":  round(elapsed_s, 3),
-        "ram_mb":     round(ram_mb, 1),
-        "n_clean":    n_clean,
-        "n_lq":       n_lq,
-        "n_person":   sum(1 for c in categories if c.is_clean and c.entity_type == "person"),
-        "n_org":      sum(1 for c in categories if c.is_clean and c.entity_type == "organization"),
-        "n_place":    sum(1 for c in categories if c.is_clean and c.entity_type == "place"),
-        "n_unknown":  sum(1 for c in categories if c.is_clean and c.entity_type == "unknown"),
+        "elapsed_s": round(elapsed_s, 3),
+        "ram_mb": round(ram_mb, 1),
+        "n_clean": n_clean,
+        "n_lq": n_lq,
+        "n_person": sum(1 for c in categories if c.is_clean and c.entity_type == "person"),
+        "n_org": sum(1 for c in categories if c.is_clean and c.entity_type == "organization"),
+        "n_place": sum(1 for c in categories if c.is_clean and c.entity_type == "place"),
+        "n_unknown": sum(1 for c in categories if c.is_clean and c.entity_type == "unknown"),
     }
 
 
@@ -444,45 +383,52 @@ def render_cat_results(result: dict):
     if not result or not result.get("categories"):
         st.info("No categories were extracted.")
         return
-        
+    
+    # Display metrics
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: st.metric("Time",         f"{result['elapsed_s']}s")
-    with c2: st.metric("RAM",          f"{result['ram_mb']:.0f} MB")
-    with c3: st.metric("Clean",        result["n_clean"])
-    with c4: st.metric("Filtered out", result["n_lq"])
-    with c5: st.metric("Total found",  len(result["categories"]))
+    with c1: 
+        st.metric("Time", f"{result['elapsed_s']}s")
+    with c2: 
+        st.metric("RAM", f"{result['ram_mb']:.0f} MB")
+    with c3: 
+        st.metric("Clean", result["n_clean"])
+    with c4: 
+        st.metric("Filtered out", result["n_lq"])
+    with c5: 
+        st.metric("Total found", len(result["categories"]))
 
     st.markdown("---")
 
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.caption("Entity type breakdown")
-        import pandas as pd
-        st.dataframe(
-            pd.DataFrame([
-                {"Type": "Person",       "Count": result["n_person"]},
-                {"Type": "Organization", "Count": result["n_org"]},
-                {"Type": "Place",        "Count": result["n_place"]},
-                {"Type": "Unknown",      "Count": result["n_unknown"]},
-            ]),
-            hide_index=True,
-            use_container_width=True,
-        )
+    # Entity type breakdown
+    st.caption("Entity type breakdown")
+    import pandas as pd
+    st.dataframe(
+        pd.DataFrame([
+            {"Type": "Person", "Count": result["n_person"]},
+            {"Type": "Organization", "Count": result["n_org"]},
+            {"Type": "Place", "Count": result["n_place"]},
+            {"Type": "Unknown", "Count": result["n_unknown"]},
+        ]),
+        hide_index=True,
+        use_container_width=True,
+    )
 
     clean = [c for c in result["categories"] if c.is_clean]
     dirty = [c for c in result["categories"] if not c.is_clean]
 
+    # Display clean categories
     if clean:
         st.markdown("**Extracted categories**")
         entity_color_map = {
-            "person":       "#388bfd",
+            "person": "#388bfd",
             "organization": "#3fb950",
-            "place":        "#d2a8ff",
-            "unknown":      "#8b949e",
+            "place": "#d2a8ff",
+            "unknown": "#8b949e",
         }
+        
         rows = ""
         for cat in sorted(clean, key=lambda c: -c.score):
-            clr  = entity_color_map.get(cat.entity_type, "#8b949e")
+            clr = entity_color_map.get(cat.entity_type, "#8b949e")
             rows += (
                 f'<tr>'
                 f'<td style="padding:7px 12px;font-size:13px;font-weight:500">{cat.name}</td>'
@@ -490,8 +436,9 @@ def render_cat_results(result: dict):
                 f'<td style="padding:7px 12px;color:#8b949e;font-size:12px;'
                 f'font-family:monospace">{cat.source}</td>'
                 f'<td style="padding:7px 12px;min-width:130px">{_bar(cat.score, clr)}</td>'
-                f'</tr>'
+                f'</table>'
             )
+        
         st.markdown(
             f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">'
             f'<thead><tr style="background:#21262d">'
@@ -507,6 +454,7 @@ def render_cat_results(result: dict):
             unsafe_allow_html=True,
         )
 
+    # Display filtered out categories
     if dirty:
         with st.expander(f"{len(dirty)} categories removed by quality filter"):
             for cat in dirty:
@@ -516,17 +464,19 @@ def render_cat_results(result: dict):
                     unsafe_allow_html=True,
                 )
 
+    # Download button
     if clean:
         import pandas as pd
         csv = pd.DataFrame([{
-            "name":        c.name,
+            "name": c.name,
             "entity_type": c.entity_type,
-            "score":       c.score,
-            "source":      c.source,
+            "score": c.score,
+            "source": c.source,
         } for c in clean]).to_csv(index=False).encode()
         st.download_button(
             "Download categories (CSV)",
             csv,
             file_name="categories.csv",
             mime="text/csv",
+            use_container_width=True,
         )
