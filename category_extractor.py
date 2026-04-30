@@ -144,27 +144,39 @@ def _is_org(name: str) -> bool:
     )
 
 
-# ── Model loaders ─────────────────────────────────────────────────────────────
+# ── Model paths ──────────────────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner=False)
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+GLINER_PATH     = os.path.join(BASE_DIR, "local-models", "gliner-medium-v2.1")
+
+
+# ── Model loaders — check local path first, download if missing ───────────────
+
+@st.cache_resource
 def _load_spacy():
     import spacy
-    for model in (SPACY_MODEL_ID, "en_core_web_md"):
+    # Installed via requirements.txt wheel URL — just load directly
+    for model_id in (SPACY_MODEL_ID, "en_core_web_md", "en_core_web_sm"):
         try:
-            return spacy.load(model)
+            return spacy.load(model_id)
         except OSError:
             continue
-    st.error("spaCy model not found. Add en-core-web-lg to requirements.txt")
-    st.stop()
+    st.error(
+        "No spaCy model found. Add this to requirements.txt:\n"
+        "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/"
+        "download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+    )
+    return None
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource
 def _load_gliner():
     from gliner import GLiNER
-    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    os.environ["HF_HOME"]            = str(HF_CACHE_DIR)
-    os.environ["TRANSFORMERS_CACHE"] = str(HF_CACHE_DIR)
-    return GLiNER.from_pretrained(GLINER_MODEL_ID)
+    if not os.path.exists(GLINER_PATH):
+        os.makedirs(GLINER_PATH, exist_ok=True)
+        model = GLiNER.from_pretrained(GLINER_MODEL_ID)
+        model.save_pretrained(GLINER_PATH)
+    return GLiNER.from_pretrained(GLINER_PATH)
 
 
 # ── Category extraction ───────────────────────────────────────────────────────
@@ -348,6 +360,12 @@ def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
 
     with st.spinner("Loading spaCy..."):
         nlp = _load_spacy()
+
+    if nlp is None:
+        st.error("spaCy model could not be loaded. Check requirements.txt.")
+        return {"categories": [], "elapsed_s": 0, "ram_mb": 0,
+                "n_clean": 0, "n_lq": 0, "n_person": 0,
+                "n_org": 0, "n_place": 0, "n_unknown": 0}
 
     with st.spinner("Loading GLiNER..."):
         gliner = _load_gliner()

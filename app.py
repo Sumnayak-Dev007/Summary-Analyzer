@@ -48,20 +48,27 @@ NOISE_PATTERNS = re.compile(
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
+BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+SPACY_LG_PATH  = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
+
+
 @st.cache_resource
 def load_spacy_lg():
-    try:
-        nlp = spacy.load("en_core_web_lg")
-        nlp.add_pipe("textrank")
-        return nlp
-    except OSError:
+    # Installed via requirements.txt wheel URL — load directly.
+    # Falls back through model sizes so app never shows blank screen.
+    for model_id in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm"):
         try:
-            nlp = spacy.load("en_core_web_md")
+            nlp = spacy.load(model_id)
             nlp.add_pipe("textrank")
             return nlp
         except OSError:
-            st.error("spaCy model not found. Add en-core-web-lg to requirements.txt")
-            st.stop()
+            continue
+    st.error(
+        "No spaCy model found. Add this to requirements.txt:\n"
+        "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/"
+        "download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+    )
+    return None
 
 
 # ── Article fetching ──────────────────────────────────────────────────────────
@@ -244,15 +251,18 @@ if btn_summarize:
         else:
             with st.spinner("Loading spaCy model..."):
                 nlp = load_spacy_lg()
-            with st.spinner("Running TextRank..."):
-                result = textrank_summarize(
-                    cleaned, nlp,
-                    n_sentences=n_sentences,
-                    min_sentence_len=min_sent_len,
-                    focus_phrases=focus_phrases,
-                )
-            st.session_state["summary_result"]  = result
-            st.session_state["summary_text"]    = cleaned
+            if nlp is None:
+                st.error("spaCy model could not be loaded. Check requirements.txt.")
+            else:
+                with st.spinner("Running TextRank..."):
+                    result = textrank_summarize(
+                        cleaned, nlp,
+                        n_sentences=n_sentences,
+                        min_sentence_len=min_sent_len,
+                        focus_phrases=focus_phrases,
+                    )
+                st.session_state["summary_result"]  = result
+                st.session_state["summary_text"]    = cleaned
 
 
 # ── Category extraction task ──────────────────────────────────────────────────
