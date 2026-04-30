@@ -5,7 +5,6 @@ import nltk
 import psutil
 import streamlit as st
 import trafilatura
-import trafilatura.keywords
 import spacy
 import pytextrank
 

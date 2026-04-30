@@ -179,17 +179,24 @@ def _extract_from_trafilatura(raw_html: Optional[str], cleaned_text: str) -> lis
 
     if raw_html:
         try:
-            import trafilatura.keywords as tkw
-            kws = tkw.extract_keywords(raw_html)
+            # trafilatura.extract() with include_tables=True and output_format="xml"
+            # exposes keywords via trafilatura.utils or directly from metadata.
+            # The stable public API is trafilatura.extract() with output_format="xml"
+            # then parse keywords from <keywords> tags, OR use bare_extraction().
+            from trafilatura import bare_extraction
+            meta = bare_extraction(raw_html, include_comments=False)
+            kws  = meta.get("tags") or [] if meta else []
             if kws:
-                max_score = max(sc for _, sc in kws) or 1
-                for term, score in kws[:30]:
+                for i, term in enumerate(kws[:30]):
+                    if not isinstance(term, str) or not term.strip():
+                        continue
                     candidates.append(Category(
                         name   = term.strip().title(),
-                        score  = round(score / max_score, 3),
+                        score  = round(1.0 - i * 0.03, 3),
                         source = "trafilatura",
                     ))
-                return candidates
+                if candidates:
+                    return candidates
         except Exception:
             pass
 
