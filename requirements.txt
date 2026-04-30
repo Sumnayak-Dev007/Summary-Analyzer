@@ -1,5 +1,5 @@
 streamlit
-trafilatura[all]
+trafilatura
 sumy
 nltk
 spacy
@@ -9,6 +9,7 @@ sentence-transformers
 scikit-learn
 transformers
 torch
+gliner
 sentencepiece
 numpy
 pandas
