@@ -517,9 +517,10 @@ if run_button and url:
 elif run_button and not url:
     st.warning("Please enter a URL first")
 
-st.divider()
-st.header("Category Extraction & NER Tagging")
-if 'cleaned' in dir() and cleaned:
-    render_category_extractor(article_text=cleaned)
-else:
-    render_category_extractor(article_text=None)
+cleaned  = clean_text(raw_text)
+st.session_state["article_text"] = cleaned  
+
+if "article_text" in st.session_state:
+    st.divider()
+    st.header("🏷️ Category Extraction & NER Tagging")
+    render_category_extractor(article_text=st.session_state["article_text"])
