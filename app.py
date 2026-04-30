@@ -275,14 +275,19 @@ if btn_categories:
         if not cleaned:
             st.error("Could not extract content from this URL.")
         else:
-            from category_extractor import run_extraction
+            # Import here to avoid circular imports
+            from category_extractor import run_extraction, render_cat_results
             st.divider()
             st.header("Category Extraction and NER Tagging")
-            # run_extraction renders stage 1 immediately, then runs GLiNER,
-            # then returns the final result — we store it for persistence
-            cat_result = run_extraction(cleaned, html)
+            
+            # Run extraction and get result
+            with st.spinner("Extracting categories and entities..."):
+                cat_result = run_extraction(cleaned, html)
+            
+            # Store and render
             st.session_state["cat_result"] = cat_result
-            st.session_state["cat_text"]   = cleaned
+            st.session_state["cat_text"] = cleaned
+            render_cat_results(cat_result)
 
 
 # ── Render summary result (persists independently) ────────────────────────────

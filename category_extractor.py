@@ -4,10 +4,6 @@ category_extractor.py
 ─────────────────────
 Category extraction using trafilatura keyword extraction,
 then spaCy + GLiNER for quality filtering and NER classification.
-
-Two functions exported to app.py:
-  run_extraction(cleaned_text, raw_html) -> dict
-  render_cat_results(result_dict)
 """
 
 import os
@@ -150,22 +146,29 @@ BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 GLINER_PATH     = os.path.join(BASE_DIR, "local-models", "gliner-medium-v2.1")
 
 
-# ── Model loaders — check local path first, download if missing ───────────────
+# ── Model loaders ───────────────────────────────────────────────
 
 @st.cache_resource
 def _load_spacy():
     import spacy
-    # Installed via requirements.txt wheel URL — just load directly
-    for model_id in (SPACY_MODEL_ID, "en_core_web_md", "en_core_web_sm"):
-        try:
-            return spacy.load(model_id)
-        except OSError:
-            continue
-    st.error(
-        "No spaCy model found. Add this to requirements.txt:\n"
-        "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/"
-        "download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
-    )
+    # Try to load the model that should be installed
+    try:
+        nlp = spacy.load("en_core_web_lg")
+        # Add textrank pipe if not already present
+        if "textrank" not in nlp.pipe_names:
+            nlp.add_pipe("textrank")
+        return nlp
+    except OSError:
+        # Fallback to smaller models
+        for model_id in ["en_core_web_md", "en_core_web_sm"]:
+            try:
+                nlp = spacy.load(model_id)
+                if "textrank" not in nlp.pipe_names:
+                    nlp.add_pipe("textrank")
+                return nlp
+            except OSError:
+                continue
+    st.error("No spaCy model found. Please ensure en_core_web_lg is installed.")
     return None
 
 
@@ -174,9 +177,17 @@ def _load_gliner():
     from gliner import GLiNER
     if not os.path.exists(GLINER_PATH):
         os.makedirs(GLINER_PATH, exist_ok=True)
-        model = GLiNER.from_pretrained(GLINER_MODEL_ID)
-        model.save_pretrained(GLINER_PATH)
-    return GLiNER.from_pretrained(GLINER_PATH)
+        try:
+            model = GLiNER.from_pretrained(GLINER_MODEL_ID)
+            model.save_pretrained(GLINER_PATH)
+        except Exception as e:
+            st.warning(f"Could not download GLiNER model: {e}")
+            return None
+    try:
+        return GLiNER.from_pretrained(GLINER_PATH)
+    except Exception as e:
+        st.warning(f"Could not load GLiNER model: {e}")
+        return None
 
 
 # ── Category extraction ───────────────────────────────────────────────────────
@@ -185,19 +196,14 @@ def _extract_from_trafilatura(raw_html: Optional[str], cleaned_text: str) -> lis
     """
     Uses trafilatura's built-in keyword extraction which runs TF-IDF
     on the document structure. Fast, no extra model needed.
-    Falls back to simple frequency counting if raw_html is unavailable.
     """
     candidates: list[Category] = []
 
     if raw_html:
         try:
-            # trafilatura.extract() with include_tables=True and output_format="xml"
-            # exposes keywords via trafilatura.utils or directly from metadata.
-            # The stable public API is trafilatura.extract() with output_format="xml"
-            # then parse keywords from <keywords> tags, OR use bare_extraction().
             from trafilatura import bare_extraction
-            meta = bare_extraction(raw_html, include_comments=False)
-            kws  = meta.get("tags") or [] if meta else []
+            meta = bare_extraction(raw_html, include_comments=False, include_tables=False)
+            kws = meta.get("tags") or [] if meta else []
             if kws:
                 for i, term in enumerate(kws[:30]):
                     if not isinstance(term, str) or not term.strip():
@@ -277,7 +283,6 @@ def _extract_spacy_ner(cleaned_text: str, nlp) -> list[Category]:
 def _quality_filter(categories: list[Category], nlp) -> list[Category]:
     """
     Runs spaCy quality filter on every category.
-    Assigns entity_type for those without one (trafilatura/frequency sources).
     """
     from collections import Counter
     label_map = {
@@ -310,7 +315,6 @@ def _quality_filter(categories: list[Category], nlp) -> list[Category]:
 def _gliner_classify(categories: list[Category], gliner, threshold: float = 0.55) -> list[Category]:
     """
     Re-classifies entity type of clean categories using GLiNER.
-    Runs on all clean categories regardless of source.
     """
     clean = [c for c in categories if c.is_clean]
     if not clean or gliner is None:
@@ -345,64 +349,46 @@ def _gliner_classify(categories: list[Category], gliner, threshold: float = 0.55
 
 def run_extraction(cleaned_text: str, raw_html: Optional[str]) -> dict:
     """
-    Two-stage pipeline so categories appear on screen immediately:
-
-    Stage 1 (fast — no heavy models):
-      - trafilatura keyword extraction
-      - spaCy NER (already loaded for summarization)
-      - spaCy quality filter
-      Shows results immediately.
-
-    Stage 2 (slow — GLiNER):
-      - Re-classifies entity types on clean categories
-      - Updates results in place
+    Run the full category extraction pipeline.
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0   = time.monotonic()
 
-    with st.spinner("Loading spaCy..."):
-        nlp = _load_spacy()
-
+    # Load spaCy
+    nlp = _load_spacy()
     if nlp is None:
         st.error("spaCy model could not be loaded. Check requirements.txt.")
         return {"categories": [], "elapsed_s": 0, "ram_mb": 0,
                 "n_clean": 0, "n_lq": 0, "n_person": 0,
                 "n_org": 0, "n_place": 0, "n_unknown": 0}
 
-    # Stage 1 — extract and filter without GLiNER
-    with st.spinner("Extracting categories..."):
-        traf_cats  = _extract_from_trafilatura(raw_html, cleaned_text)
-        spacy_cats = _extract_spacy_ner(cleaned_text, nlp)
+    # Extract categories
+    traf_cats  = _extract_from_trafilatura(raw_html, cleaned_text)
+    spacy_cats = _extract_spacy_ner(cleaned_text, nlp)
 
-        seen_names: set[str] = set()
-        merged: list[Category] = []
-        for cat in traf_cats + spacy_cats:
-            key = cat.name.strip().lower()
-            if key and key not in seen_names:
-                seen_names.add(key)
-                merged.append(cat)
+    # Merge and deduplicate
+    seen_names: set[str] = set()
+    merged: list[Category] = []
+    for cat in traf_cats + spacy_cats:
+        key = cat.name.strip().lower()
+        if key and key not in seen_names:
+            seen_names.add(key)
+            merged.append(cat)
 
-        filtered = _quality_filter(merged, nlp)
+    # Quality filter
+    filtered = _quality_filter(merged, nlp)
 
-    stage1_elapsed = time.monotonic() - t0
-
-    # Show stage 1 results immediately to the user
-    result = _build_result(filtered, stage1_elapsed,
-                           proc.memory_info().rss / 1024 / 1024 - ram0)
-    st.session_state["cat_result"] = result
-    render_cat_results(result)
-
-    # Stage 2 — GLiNER re-classification (shown as update below the table)
-    with st.spinner("Running GLiNER NER classification..."):
-        gliner     = _load_gliner()
-        classified = _gliner_classify(filtered, gliner)
+    # GLiNER classification (optional)
+    gliner = _load_gliner()
+    if gliner:
+        filtered = _gliner_classify(filtered, gliner)
 
     elapsed  = time.monotonic() - t0
     ram_used = proc.memory_info().rss / 1024 / 1024 - ram0
 
-    # Return final result with GLiNER classifications
-    return _build_result(classified, round(elapsed, 3), round(ram_used, 1))
+    # Build and return result
+    return _build_result(filtered, round(elapsed, 3), round(ram_used, 1))
 
 
 def _build_result(categories: list, elapsed_s: float, ram_mb: float) -> dict:
@@ -454,6 +440,11 @@ def _bar(score: float, color: str = "#58a6ff") -> str:
 
 
 def render_cat_results(result: dict):
+    """Render category results in the Streamlit UI"""
+    if not result or not result.get("categories"):
+        st.info("No categories were extracted.")
+        return
+        
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("Time",         f"{result['elapsed_s']}s")
     with c2: st.metric("RAM",          f"{result['ram_mb']:.0f} MB")
