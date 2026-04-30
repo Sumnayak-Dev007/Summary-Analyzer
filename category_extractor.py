@@ -466,7 +466,7 @@ def _bar(score: float) -> str:
         f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
         f'<div style="width:{pct}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
         f'</div>'
-        f'<span style="font-size:13px>{score:.2f}</span>'
+        f'<span style="font-size:13px">{score:.2f}</span>'
         f'</div>'
     )
 
