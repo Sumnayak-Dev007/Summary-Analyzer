@@ -384,22 +384,13 @@ if btn_summarize and url:
     with st.spinner("Fetching and analyzing article..."):
         cleaned, _ = get_article(url)
         if cleaned:
-            full_text, article_title = smart_article_cleaning(cleaned)
+            body_text, article_title = smart_article_cleaning(cleaned)
             spacy_nlp = load_spacy_for_ner()
             
             if spacy_nlp:
-                # Extract body separately - DON'T use full_text with title
-                body_text = cleaned  # Start with original cleaned text
-                
-                # Remove title from body if detected
-                if article_title:
-                    body_text = body_text.replace(article_title, '', 1)
-                    body_text = body_text.replace(f"{article_title}. ", '', 1)
-                    body_text = body_text.replace(f"{article_title} ", '', 1)
-                
                 auto_phrases = auto_detect_focus_phrases(body_text, spacy_nlp)
                 
-                st.session_state.full_text = body_text  # Use body_text WITHOUT title
+                st.session_state.full_text = body_text
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
                 st.session_state.spacy_model = spacy_nlp
@@ -409,7 +400,7 @@ if btn_summarize and url:
                 
                 with st.spinner("Generating initial summary..."):
                     initial_result = sumy_textrank_summarize(
-                        body_text,  # Use body_text WITHOUT title
+                        body_text,
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
                         focus_phrases=None,
