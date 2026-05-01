@@ -99,28 +99,21 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     Separates title from article body for better summarization.
     Returns (full_text_for_context, title_for_display)
     """
-    lines = text.split('\n')
+    lines = text.split('. ')
     
     title = None
     body = text
     
-    # Method 1: Check if first line is short and likely a title
-    if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
-        title = lines[0].strip()
-        body = ' '.join(lines[1:]) if len(lines) > 1 else text
+    first_part = lines[0].strip() if lines else ""
     
-    # Method 2: Look for quoted title
-    first_part = text.split('. ')[0] if '. ' in text else text[:100]
     if first_part and (first_part.startswith("'") or first_part.startswith('"') or first_part.startswith('‘')):
         title = first_part.strip("'\"‘’")
         body = text[len(first_part):].strip()
         if body.startswith(('.', '!', '?')):
             body = body[1:].strip()
-    
-    # Method 3: Look for short first sentence (less than 80 chars without ending punctuation)
     elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
         title = first_part
-        body = '. '.join(text.split('. ')[1:]) if '. ' in text else text
+        body = '. '.join(lines[1:]) if len(lines) > 1 else text
     
     if title:
         full_text = f"{title}. {body}"
@@ -128,114 +121,6 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
         full_text = body
     
     return full_text, title
-
-
-def remove_title_from_text(text: str, title: str | None = None) -> str:
-    """
-    Aggressively remove title/headline from article text.
-    """
-    if not title:
-        # Try to auto-detect title if not provided
-        lines = text.split('\n')
-        if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
-            title = lines[0].strip()
-    
-    clean_text = text
-    
-    if title:
-        # Method 1: Remove title as a line
-        clean_text = clean_text.replace(title, '', 1)
-        
-        # Method 2: Remove title followed by newline
-        clean_text = clean_text.replace(f"{title}\n", '', 1)
-        
-        # Method 3: Remove title followed by period and space
-        clean_text = clean_text.replace(f"{title}. ", '', 1)
-        
-        # Method 4: Remove quoted title
-        title_clean = title.strip("'\"‘’")
-        clean_text = clean_text.replace(f"'{title_clean}' ", '', 1)
-        clean_text = clean_text.replace(f'"{title_clean}" ', '', 1)
-        clean_text = clean_text.replace(f"‘{title_clean}’ ", '', 1)
-    
-    # Method 5: Remove first line if it's short and doesn't end with punctuation
-    lines = clean_text.split('\n')
-    if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
-        clean_text = ' '.join(lines[1:]) if len(lines) > 1 else clean_text
-    
-    # Method 6: Remove first sentence if it's very short and likely a subtitle
-    sentences = re.split(r'(?<=[.!?])\s+', clean_text)
-    if sentences and len(sentences[0]) < 80 and not sentences[0].endswith(('.', '!', '?')):
-        clean_text = ' '.join(sentences[1:]) if len(sentences) > 1 else clean_text
-    
-    # Method 7: Remove any line that looks like a headline (all caps or short with no period)
-    lines = clean_text.split('. ')
-    if lines and len(lines[0]) < 80 and ' ' in lines[0] and not any(c.islower() for c in lines[0][:10]):
-        clean_text = '. '.join(lines[1:]) if len(lines) > 1 else clean_text
-    
-    # Clean up extra spaces
-    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-    
-    return clean_text
-
-
-def calculate_quote_score(sent_text: str) -> float:
-    """Boost score for sentences with well-formed quotes."""
-    score = 0
-    
-    # Check for opening and closing quotes
-    if '"' in sent_text or "'" in sent_text or '“' in sent_text or '”' in sent_text:
-        score += 0.3
-        
-        # Check if quote has attribution (said, added, emphasised, etc.)
-        attribution_words = ['said', 'added', 'emphasised', 'stated', 'told', 'explained', 'noted']
-        if any(word in sent_text.lower() for word in attribution_words):
-            score += 0.2
-            
-        # Check if quote is complete (starts and ends with quotes)
-        quote_chars = ['"', "'", '“', '”']
-        has_opening = any(c in sent_text for c in quote_chars)
-        has_closing = any(c in sent_text for c in quote_chars)
-        if has_opening and has_closing:
-            score += 0.3
-            
-    return score
-
-
-def remove_dateline(text: str) -> str:
-    """Remove datelines like 'New Delhi:', 'Washington:', etc."""
-    # Remove patterns like "City Name:" at beginning
-    text = re.sub(r'^[A-Z][a-z]+(?: [A-Z][a-z]+)?:\s*', '', text)
-    # Remove "New Delhi:" anywhere
-    text = re.sub(r'\bNew Delhi:\s*', '', text)
-    # Remove "City, Country:" patterns
-    text = re.sub(r'^[A-Z][a-z]+, [A-Z][a-z]+:\s*', '', text)
-    return text
-
-
-def is_complete_quote(sent_text: str) -> bool:
-    """Check if a quote in the sentence is complete."""
-    # Count quote characters
-    quote_count = sent_text.count('"') + sent_text.count("'") + sent_text.count('“') + sent_text.count('”')
-    
-    # Even number means balanced quotes
-    if quote_count > 0 and quote_count % 2 == 0:
-        return True
-    return False
-
-def fix_cut_quote(sent_text: str, original_text: str) -> str:
-    """If quote is cut off, try to complete it."""
-    if not is_complete_quote(sent_text):
-        # Try to find the rest of the quote in the original text
-        quote_start = re.search(r'[“"\'][^”"\']*$', sent_text)
-        if quote_start:
-            quote_text = quote_start.group()
-            # Look for closing quote in next sentences
-            next_part = original_text[original_text.find(sent_text) + len(sent_text):]
-            closing = re.search(r'[^”"\']*[”"\']', next_part)
-            if closing:
-                sent_text = sent_text + closing.group()
-    return sent_text
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
@@ -273,33 +158,50 @@ def sumy_textrank_summarize(
     bullet_points: bool = False,
     title: str | None = None,
 ) -> dict:
-    """Sumy TextRank summarization with title removal and quote handling."""
+    """Sumy TextRank summarization with intelligent lead sentence detection and focus phrases."""
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
-    # Remove datelines first
-    clean_text = text
-    dateline_patterns = [
-        r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?:\s*',
-        r'^[A-Z][a-z]+, [A-Z][a-z]+:\s*',
-        r'\b[A-Z][a-z]+:\s+(?=[A-Z])',
-    ]
-    for pattern in dateline_patterns:
-        clean_text = re.sub(pattern, '', clean_text)
+    # Remove title from the text if present (for summarization only)
+    clean_text_for_summary = text
     
-    # Aggressively remove title
-    clean_text_for_summary = remove_title_from_text(clean_text, title)
+    if title:
+        # Try multiple patterns to remove the title
+        title_clean = title.strip()
+        
+        # Pattern 1: Title followed by period and space
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}. ", "", 1)
+        
+        # Pattern 2: Title followed by space (no period)
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean} ", "", 1)
+        
+        # Pattern 3: Title with newline
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}\n", "", 1)
+        
+        # Pattern 4: Title at beginning with line break
+        lines = clean_text_for_summary.split('\n')
+        if lines and lines[0].strip() == title_clean:
+            lines = lines[1:]
+            clean_text_for_summary = '\n'.join(lines)
+        
+        # Pattern 5: Remove quoted titles (like 'Title here' followed by space)
+        if title_clean.startswith("'") or title_clean.startswith('"') or title_clean.startswith('‘'):
+            quoted_title = title_clean.strip("'\"‘’")
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title}. ", "", 1)
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title} ", "", 1)
     
-    # Remove any lingering datelines
-    clean_text_for_summary = remove_dateline(clean_text_for_summary)
-    
-    # If the first sentence still looks like a title, remove it
-    first_sent = clean_text_for_summary.split('. ')[0] if '. ' in clean_text_for_summary else clean_text_for_summary[:100]
-    if len(first_sent) < 80 and not first_sent.endswith(('.', '!', '?')):
-        parts = clean_text_for_summary.split('. ', 1)
-        if len(parts) > 1:
-            clean_text_for_summary = parts[1]
+    # Also remove common title patterns (short first line that doesn't end with period)
+    first_line = clean_text_for_summary.split('\n')[0] if '\n' in clean_text_for_summary else clean_text_for_summary[:100]
+    if len(first_line) < 80 and not first_line.endswith(('.', '!', '?')):
+        # Remove the first line as it's likely a title
+        if '\n' in clean_text_for_summary:
+            clean_text_for_summary = '\n'.join(clean_text_for_summary.split('\n')[1:])
+        else:
+            # Find first period to skip the title
+            period_pos = clean_text_for_summary.find('. ')
+            if period_pos > 0 and period_pos < 100:
+                clean_text_for_summary = clean_text_for_summary[period_pos + 2:]
     
     parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
     summarizer = TextRankSummarizer()
@@ -307,17 +209,14 @@ def sumy_textrank_summarize(
     all_sentences = [str(sent).strip() for sent in parser.document.sentences]
     first_proper_sentence = all_sentences[0] if all_sentences else ""
 
-    # Get summary sentences (get more for ranking)
     summary_sentences = summarizer(parser.document, n_sentences * 2)
     
-    # Build sentence scores
     sent_scores: dict[str, float] = {}
     for sent in summary_sentences:
         sent_text = str(sent).strip()
         if len(sent_text) >= min_sentence_len:
             sent_scores[sent_text] = sent_scores.get(sent_text, 0) + 1
     
-    # Apply focus phrase boosting
     if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
             for fp in focus_phrases:
@@ -347,7 +246,6 @@ def sumy_textrank_summarize(
             "method": "fallback",
         }
 
-    # Sort by score and select top sentences
     top = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
 
     def _overlap(a: str, b: str) -> float:
@@ -358,7 +256,6 @@ def sumy_textrank_summarize(
 
     selected: list[tuple[str, float]] = []
     
-    # Intelligent lead sentence selection
     lead_candidates = []
     
     if len(first_proper_sentence) >= min_sentence_len:
@@ -371,7 +268,6 @@ def sumy_textrank_summarize(
         best_lead = max(lead_candidates, key=lambda x: x[1])
         selected.append(best_lead)
     
-    # Add other important sentences
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
@@ -381,7 +277,6 @@ def sumy_textrank_summarize(
             continue
         selected.append((sent_text, score))
 
-    # Reorder to original article sequence
     selected = sorted(
         selected,
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
@@ -389,26 +284,20 @@ def sumy_textrank_summarize(
 
     summary_sentences_final = [s for s, _ in selected]
     
-    # Clean each sentence
     cleaned_sentences = []
     for sent in summary_sentences_final:
         sent = re.sub(r'\s+', ' ', sent)
-        # Remove any lingering datelines
-        sent = re.sub(r'\bNew Delhi:\s*', '', sent)
-        sent = re.sub(r'\b[A-Z][a-z]+:\s*$', '', sent)
         if not sent.endswith(('.', '!', '?')):
             sent = sent + '.'
         sent = re.sub(r'\.\.+', '.', sent)
         cleaned_sentences.append(sent)
     
-    # Format based on bullet_points preference
     if bullet_points:
         bullet_list = [f"• {sent}" for sent in cleaned_sentences]
         summary = "\n\n".join(bullet_list)
     else:
         summary = " ".join(cleaned_sentences)
     
-    # Ensure first letter is capitalized
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
 
@@ -419,6 +308,7 @@ def sumy_textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
+
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
