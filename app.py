@@ -7,9 +7,6 @@ import streamlit as st
 import trafilatura
 import spacy
 import pytextrank
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.text_rank import TextRankSummarizer
 
 st.set_page_config(
     page_title="Article Analyzer",
@@ -60,27 +57,19 @@ def load_spacy_lg():
     """Load spaCy large model with TextRank pipeline"""
     try:
         nlp = spacy.load("en_core_web_lg")
-        # Check if textrank already exists to avoid duplicate
         if "textrank" not in nlp.pipe_names:
             nlp.add_pipe("textrank")
         return nlp
     except OSError:
         st.error(
             "en_core_web_lg model not found.\n\n"
-            "Please install it using one of these methods:\n\n"
-            "1. Run: python -m spacy download en_core_web_lg\n\n"
-            "2. Or add to requirements.txt:\n"
-            "   en-core-web-lg @ https://github.com/explosion/spacy-models/releases/"
-            "download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+            "Please install it using: python -m spacy download en_core_web_lg"
         )
         return None
 
 
 def fetch_article(url: str) -> tuple[str | None, str | None]:
-    """
-    Returns (cleaned_text, raw_html) — raw_html kept so trafilatura
-    keyword extraction can use the full document structure.
-    """
+    """Returns (cleaned_text, raw_html)"""
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
         return None, None
@@ -105,48 +94,33 @@ def fetch_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, downloaded
 
 
-def clean_text(text: str) -> str:
-    text = NOISE_PATTERNS.sub("", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
-
-
-def sumy_textrank_summarize(text: str, n_sentences: int = 5) -> tuple[str, dict]:
-    """Sumy's TextRank implementation (keyword-based)"""
-    process = psutil.Process(os.getpid())
-    ram_before = process.memory_info().rss / 1024 / 1024
-    start = time.time()
+def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
+    """
+    Automatically detect important focus phrases from the article.
+    Returns list of important named entities and key phrases.
+    """
+    doc = nlp(text[:50000])
     
-    try:
-        parser = PlaintextParser.from_string(text, Tokenizer("english"))
-        summarizer = TextRankSummarizer()
-        summary_sentences = summarizer(parser.document, n_sentences)
-        
-        # Get all sentences in original order
-        original_sentences = [str(sent) for sent in parser.document.sentences]
-        
-        # Extract summary sentences
-        summary_texts = [str(s) for s in summary_sentences if len(str(s)) > 40]
-        
-        # Preserve original order
-        ordered = []
-        for sent in summary_texts:
-            try:
-                idx = original_sentences.index(sent)
-                ordered.append((idx, sent))
-            except ValueError:
-                continue
-        
-        ordered.sort(key=lambda x: x[0])
-        summary = " ".join([s[1] for s in ordered]).strip()
-        
-    except Exception as e:
-        summary = f"Error: {e}"
+    # Collect named entities (people, organizations, places, products, events)
+    entities = []
+    for ent in doc.ents:
+        if ent.label_ in ["PERSON", "ORG", "GPE", "PRODUCT", "EVENT", "NORP", "LOC"]:
+            text_clean = ent.text.strip()
+            if 3 < len(text_clean) < 40:
+                entities.append(text_clean)
     
-    elapsed = round(time.time() - start, 3)
-    ram_used = round(process.memory_info().rss / 1024 / 1024 - ram_before, 2)
+    # Count frequency of each entity
+    from collections import Counter
+    entity_counts = Counter(entities)
     
-    return summary, {"elapsed": elapsed, "ram": ram_used, "words": len(summary.split())}
+    # Get top entities by frequency (at least 2 mentions)
+    top_entities = [entity for entity, count in entity_counts.most_common(10) if count >= 2]
+    
+    # If no repeated entities, take unique ones
+    if not top_entities:
+        top_entities = list(dict.fromkeys(entities))[:7]
+    
+    return top_entities[:7]  # Return top 7 focus phrases
 
 
 def textrank_summarize(
@@ -155,10 +129,16 @@ def textrank_summarize(
     n_sentences: int = 7,
     min_sentence_len: int = 32,
     focus_phrases: list[str] | None = None,
+    phrase_boost: float = 1.5,
+    diversity_threshold: float = 0.6,
+    bullet_points: bool = False,
 ) -> dict:
+    """
+    spaCy + PyTextRank summarization with tunable parameters.
+    """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
-    t0   = time.monotonic()
+    t0 = time.monotonic()
 
     doc = nlp(text[:100_000])
 
@@ -169,11 +149,12 @@ def textrank_summarize(
                 key = sent.text.strip()
                 sent_scores[key] = sent_scores.get(key, 0) + phrase.rank
 
+    # Apply focus phrase boosting
     if focus_phrases:
         for key in sent_scores:
             for fp in focus_phrases:
                 if fp.lower() in key.lower():
-                    sent_scores[key] *= 1.5
+                    sent_scores[key] *= phrase_boost
 
     sent_scores = {s: sc for s, sc in sent_scores.items() if len(s) >= min_sentence_len}
 
@@ -182,12 +163,19 @@ def textrank_summarize(
             s.text.strip() for s in doc.sents
             if len(s.text.strip()) >= min_sentence_len
         ][:n_sentences]
+        summary = " ".join(fallback)
+        if bullet_points:
+            # Convert to bullet points if requested
+            sentences_list = [s.strip() for s in summary.split('. ') if s.strip()]
+            bullet_summary = "\n".join([f"• {s}." for s in sentences_list])
+            summary = bullet_summary
+        
         return {
-            "summary":   " ".join(fallback),
+            "summary": summary,
             "sentences": [(s, 0.0) for s in fallback],
             "elapsed_s": round(time.monotonic() - t0, 3),
-            "ram_mb":    round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
-            "method":    "fallback",
+            "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
+            "method": "fallback",
         }
 
     top = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
@@ -202,22 +190,37 @@ def textrank_summarize(
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
-        if any(_overlap(sent_text, s) > 0.6 for s, _ in selected):
+        if any(_overlap(sent_text, s) > diversity_threshold for s, _ in selected):
             continue
         selected.append((sent_text, score))
 
     all_ordered = [s.text.strip() for s in doc.sents]
-    selected    = sorted(
+    selected = sorted(
         selected,
         key=lambda x: all_ordered.index(x[0]) if x[0] in all_ordered else 9999
     )
 
+    summary = " ".join(s for s, _ in selected)
+    
+    # Convert to bullet points if requested
+    if bullet_points:
+        # Split into sentences and format as bullet points
+        sentences_list = []
+        for sent in summary.split('. '):
+            sent = sent.strip()
+            if sent and len(sent) > 10:
+                # Add period back if missing
+                if not sent.endswith('.'):
+                    sent = sent + '.'
+                sentences_list.append(f"• {sent}")
+        summary = "\n".join(sentences_list)
+
     return {
-        "summary":   " ".join(s for s, _ in selected),
+        "summary": summary,
         "sentences": selected,
         "elapsed_s": round(time.monotonic() - t0, 3),
-        "ram_mb":    round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
-        "method":    "textrank",
+        "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
+        "method": "textrank",
     }
 
 
@@ -234,34 +237,43 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Summarization")
-    n_sentences   = st.slider("Summary sentences", 2, 15, 7)
-    min_sent_len  = st.slider("Min sentence length (chars)", 20, 100, 32)
-    focus_input   = st.text_input(
-        "Focus phrases (comma separated)",
-        placeholder="e.g. Narendra Modi, Budget 2025"
-    )
-    focus_phrases = (
-        [p.strip() for p in focus_input.split(",") if p.strip()]
-        if focus_input.strip() else None
-    )
-
-    btn_summarize  = st.button("Analyze Article",      type="primary",   width="stretch")
+    st.subheader("Summarization Settings")
+    
+    n_sentences = st.slider("Number of sentences", 2, 15, 7,
+                            help="More sentences = more detailed summary")
+    
+    # Remove min_sentence_len slider when bullet points is checked
+    min_sent_len = st.slider("Min sentence length (chars)", 20, 100, 32,
+                             help="Shorter = more sentences included")
+    
+    st.divider()
+    
+    # Bullet points option
+    bullet_points = st.checkbox("Show summary as bullet points", value=False,
+                                help="Convert summary into easy-to-read bullet points")
+    
+    st.divider()
+    
+    # Focus phrases section - only show if article is loaded
+    st.subheader("Focus Phrases")
+    st.markdown("*Automatically detected from the article*")
+    
+    # Placeholder for focus phrases - will be populated after article fetch
+    focus_phrases_selected = []
+    
+    # These buttons will be enabled after article is fetched
+    btn_summarize = st.button("Analyze Article", type="primary", width="stretch")
 
     st.divider()
     st.subheader("Category Extraction")
-    btn_categories = st.button("Extract Categories",   type="secondary", width="stretch")
+    btn_categories = st.button("Extract Categories", type="secondary", width="stretch")
 
 
 # ── Fetch article (shared between both tasks) ─────────────────────────────────
 
 def get_article(url: str) -> tuple[str | None, str | None]:
-    """
-    Returns cached (cleaned_text, raw_html) if URL already fetched,
-    otherwise fetches and caches it.
-    """
     if (
-        "article_url"  in st.session_state
+        "article_url" in st.session_state
         and st.session_state["article_url"] == url.strip()
         and "article_text" in st.session_state
     ):
@@ -273,7 +285,7 @@ def get_article(url: str) -> tuple[str | None, str | None]:
     if cleaned:
         st.session_state["article_text"] = cleaned
         st.session_state["article_html"] = html
-        st.session_state["article_url"]  = url.strip()
+        st.session_state["article_url"] = url.strip()
 
     return cleaned, html
 
@@ -288,82 +300,98 @@ if btn_summarize:
         if not cleaned:
             st.error("Could not extract content from this URL.")
         else:
-            # Run Sumy TextRank
-            with st.spinner("Running Sumy TextRank..."):
-                sumy_summary, sumy_metrics = sumy_textrank_summarize(cleaned, n_sentences)
-            
-            # Run spaCy PyTextRank
+            # Load spaCy model
             with st.spinner("Loading spaCy model..."):
                 nlp = load_spacy_lg()
             
             if nlp is None:
-                st.error("spaCy model could not be loaded. Check requirements.txt.")
+                st.error("spaCy model could not be loaded.")
             else:
-                with st.spinner("Running spaCy PyTextRank..."):
+                # Auto-detect focus phrases
+                with st.spinner("Analyzing article for key topics..."):
+                    auto_focus_phrases = auto_detect_focus_phrases(cleaned, nlp)
+                
+                # Store for later use
+                st.session_state["auto_focus_phrases"] = auto_focus_phrases
+                
+                # Show detected focus phrases and let user select
+                st.info(f"📌 **Detected key topics in this article:**")
+                
+                # Create multiselect for focus phrases
+                focus_phrases_selected = st.multiselect(
+                    "Select phrases to focus on (minimum 1 recommended):",
+                    options=auto_focus_phrases,
+                    default=auto_focus_phrases[:3] if len(auto_focus_phrases) >= 3 else auto_focus_phrases,
+                    help="Selecting phrases makes the summary emphasize these topics"
+                )
+                
+                # Validate minimum selection
+                if len(focus_phrases_selected) == 0:
+                    st.warning("⚠️ Please select at least one focus phrase for better results. Using default focus.")
+                    focus_phrases_selected = auto_focus_phrases[:2] if auto_focus_phrases else None
+                
+                # Option to boost phrase importance
+                phrase_boost = st.slider(
+                    "How much to emphasize selected phrases?",
+                    1.0, 2.5, 1.5, 0.1,
+                    help="Higher = more weight on sentences containing selected phrases"
+                )
+                
+                st.divider()
+                
+                # Run summarization
+                with st.spinner("Generating summary..."):
                     result = textrank_summarize(
                         cleaned, nlp,
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
-                        focus_phrases=focus_phrases,
+                        focus_phrases=focus_phrases_selected if focus_phrases_selected else None,
+                        phrase_boost=phrase_boost,
+                        diversity_threshold=0.6,
+                        bullet_points=bullet_points,
                     )
                 
-                # Store both results
-                st.session_state["sumy_summary"] = sumy_summary
-                st.session_state["sumy_metrics"] = sumy_metrics
                 st.session_state["summary_result"] = result
                 st.session_state["summary_text"] = cleaned
+                st.session_state["focus_phrases_used"] = focus_phrases_selected
 
 
+# ── Render summary result (persists independently) ────────────────────────────
 
 if "summary_result" in st.session_state:
     result = st.session_state["summary_result"]
-    sumy_summary = st.session_state.get("sumy_summary", "")
-    sumy_metrics = st.session_state.get("sumy_metrics", {})
     cleaned = st.session_state["summary_text"]
+    focus_phrases_used = st.session_state.get("focus_phrases_used", [])
 
-    st.header("TextRank Method Comparison")
-    
-    # Display Sumy TextRank (first)
-    st.markdown("### Sumy TextRank")
-    st.markdown("*Keyword-based TextRank*")
-    
-    if sumy_metrics:
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            st.metric("Time", f"{sumy_metrics.get('elapsed', 0)}s")
-        with m2:
-            st.metric("RAM", f"{sumy_metrics.get('ram', 0)} MB")
-        with m3:
-            st.metric("Words", sumy_metrics.get('words', 0))
-    
-    st.markdown("**Summary:**")
-    st.markdown(sumy_summary if sumy_summary else "No summary generated")
-    
-    st.divider()
-    
-    # Display spaCy PyTextRank (second)
-    st.markdown("### spaCy PyTextRank")
-    st.markdown("*Phrase-based TextRank*")
-    
-    m1, m2, m3 = st.columns(3)
-    with m1:
+    st.header("Summary")
+
+    # Show metrics
+    c1, c2, c3 = st.columns(3)
+    with c1: 
         st.metric("Time", f"{result['elapsed_s']}s")
-    with m2:
+    with c2: 
         st.metric("RAM delta", f"{result['ram_mb']} MB")
-    with m3:
-        st.metric("Sentences", len(result["sentences"]))
-    
-    st.markdown("**Summary:**")
-    st.markdown(result["summary"])
-    
-    st.divider()
-    
+    with c3: 
+        st.metric("Total items", len(result["sentences"]) if not bullet_points else len(result["summary"].split('\n')))
+
+    # Show focus phrases used
+    if focus_phrases_used:
+        st.info(f"🎯 **Focusing on:** {', '.join(focus_phrases_used)}")
+
+    # Display summary
+    if bullet_points:
+        st.markdown("### Summary (Bullet Points)")
+        st.markdown(result["summary"])
+    else:
+        st.markdown("### Summary")
+        st.markdown(result["summary"])
+
     with st.expander("Full article text"):
         st.write(cleaned)
-    
-    # Show sentence scores for spaCy
+
+    # Show sentence scores for debugging
     if result["sentences"] and any(s > 0 for _, s in result["sentences"]):
-        with st.expander("spaCy PyTextRank - Sentence Scores"):
+        with st.expander("Sentence Scores (Debug)"):
             max_score = max(s for _, s in result["sentences"]) or 1
             for sent_text, score in sorted(result["sentences"], key=lambda x: -x[1]):
                 bar_w = int(score / max_score * 100)
@@ -378,22 +406,7 @@ if "summary_result" in st.session_state:
                     f'</div></div>',
                     unsafe_allow_html=True
                 )
-    
-    # Key differences explanation
-    with st.expander("Key Differences Between Methods"):
-        st.markdown("""
-        **Sumy TextRank:**
-        - Builds graph where nodes are **words**
-        - Connects words that appear near each other
-        - Good for: General content, faster processing
-        - May miss named entities
-        
-        **spaCy PyTextRank:**
-        - Builds graph where nodes are **noun phrases**
-        - Uses grammatical dependencies (subject, object, etc.)
-        - Good for: Articles with many named entities (people, places, organizations)
-        - Better captures quotes and important names
-        """)
+
 
 # ── Category extraction task ──────────────────────────────────────────────────
 
@@ -405,16 +418,13 @@ if btn_categories:
         if not cleaned:
             st.error("Could not extract content from this URL.")
         else:
-            # Import here to avoid circular imports
             from category_extractor import run_extraction, render_cat_results
             st.divider()
             st.header("Category Extraction and NER Tagging")
             
-            # Run extraction and get result
             with st.spinner("Extracting categories and entities..."):
                 cat_result = run_extraction(cleaned, html)
             
-            # Store and render
             st.session_state["cat_result"] = cat_result
             st.session_state["cat_text"] = cleaned
             render_cat_results(cat_result)
