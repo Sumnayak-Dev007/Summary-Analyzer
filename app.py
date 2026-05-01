@@ -98,7 +98,7 @@ def fetch_article(url: str) -> tuple[str | None, str | None]:
 def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     """
     Separates title from article body for better summarization.
-    Returns (full_text_for_context, title_for_display)
+    Returns (body_text_for_summarization, title_for_display)
     """
     lines = text.split('\n')
     
@@ -123,12 +123,9 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
         title = first_part
         body = '. '.join(text.split('. ')[1:]) if '. ' in text else text
     
-    if title:
-        full_text = f"{title}. {body}"
-    else:
-        full_text = body
-    
-    return full_text, title
+    # IMPORTANT: Return body (without title) for summarization
+    # Title is only for display, not for processing
+    return body, title
 
 
 
@@ -529,8 +526,9 @@ if btn_summarize and url:
             
             if spacy_nlp:
                 auto_phrases = auto_detect_focus_phrases(full_text, spacy_nlp)
+                body_text, article_title = smart_article_cleaning(cleaned)
                 
-                st.session_state.full_text = full_text
+                st.session_state.full_text = body_text
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
                 st.session_state.spacy_model = spacy_nlp
