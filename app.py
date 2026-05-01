@@ -6,7 +6,9 @@ import psutil
 import streamlit as st
 import trafilatura
 import spacy
-import pytextrank
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.text_rank import TextRankSummarizer
 
 st.set_page_config(
     page_title="Article Analyzer",
@@ -53,12 +55,10 @@ SPACY_LG_PATH  = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
 
 
 @st.cache_resource
-def load_spacy_lg():
-    """Load spaCy large model with TextRank pipeline"""
+def load_spacy_for_ner():
+    """Load spaCy large model only for NER (entity detection for focus phrases)"""
     try:
         nlp = spacy.load("en_core_web_lg")
-        if "textrank" not in nlp.pipe_names:
-            nlp.add_pipe("textrank")
         return nlp
     except OSError:
         st.error(
@@ -124,7 +124,7 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
-    """Automatically detect important focus phrases from the article."""
+    """Automatically detect important focus phrases from the article using spaCy NER."""
     doc = nlp(text[:50000])
     
     entities = []
@@ -148,9 +148,8 @@ def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
     return top_entities[:7]
 
 
-def textrank_summarize(
+def sumy_textrank_summarize(
     text: str,
-    nlp,
     n_sentences: int = 6,
     min_sentence_len: int = 32,
     focus_phrases: list[str] | None = None,
@@ -159,14 +158,19 @@ def textrank_summarize(
     bullet_points: bool = False,
     title: str | None = None,
 ) -> dict:
-    """spaCy + PyTextRank summarization with intelligent lead sentence detection."""
+    """Sumy TextRank summarization with intelligent lead sentence detection and focus phrases."""
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
-    doc = nlp(text[:100_000])
-    all_sentences = [sent.text.strip() for sent in doc.sents]
+    # Parse text with Sumy
+    parser = PlaintextParser.from_string(text, Tokenizer("english"))
+    summarizer = TextRankSummarizer()
     
+    # Get all sentences in original order
+    all_sentences = [str(sent).strip() for sent in parser.document.sentences]
+    
+    # Find the proper lead sentence
     first_proper_sentence = all_sentences[0] if all_sentences else ""
     
     if title and title in first_proper_sentence:
@@ -177,26 +181,25 @@ def textrank_summarize(
             if actual_lead and len(actual_lead) > 30:
                 first_proper_sentence = actual_lead
 
+    # Get summary sentences from Sumy
+    summary_sentences = summarizer(parser.document, n_sentences * 2)  # Get extra for ranking
+    
+    # Build sentence scores
     sent_scores: dict[str, float] = {}
-    for phrase in doc._.phrases:
-        for sent in doc.sents:
-            if phrase.text.lower() in sent.text.lower():
-                key = sent.text.strip()
-                sent_scores[key] = sent_scores.get(key, 0) + phrase.rank
-
+    for sent in summary_sentences:
+        sent_text = str(sent).strip()
+        if len(sent_text) >= min_sentence_len:
+            sent_scores[sent_text] = sent_scores.get(sent_text, 0) + 1
+    
+    # Apply focus phrase boosting
     if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
             for fp in focus_phrases:
                 if fp.lower() in key.lower():
                     sent_scores[key] *= phrase_boost
 
-    sent_scores = {s: sc for s, sc in sent_scores.items() if len(s) >= min_sentence_len}
-
     if not sent_scores:
-        fallback = [
-            s.text.strip() for s in doc.sents
-            if len(s.text.strip()) >= min_sentence_len
-        ][:n_sentences]
+        fallback = [s for s in all_sentences if len(s) >= min_sentence_len][:n_sentences]
         
         if bullet_points:
             sentences_list = []
@@ -218,6 +221,7 @@ def textrank_summarize(
             "method": "fallback",
         }
 
+    # Sort by score and select top sentences
     top = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
 
     def _overlap(a: str, b: str) -> float:
@@ -228,6 +232,7 @@ def textrank_summarize(
 
     selected: list[tuple[str, float]] = []
     
+    # Intelligent lead sentence selection
     lead_candidates = []
     
     if len(first_proper_sentence) >= min_sentence_len:
@@ -240,6 +245,7 @@ def textrank_summarize(
         best_lead = max(lead_candidates, key=lambda x: x[1])
         selected.append(best_lead)
     
+    # Add other important sentences
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
@@ -249,27 +255,31 @@ def textrank_summarize(
             continue
         selected.append((sent_text, score))
 
+    # Reorder to original article sequence
     selected = sorted(
         selected,
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
     )
 
-    summary_sentences = [s for s, _ in selected]
+    summary_sentences_final = [s for s, _ in selected]
     
+    # Clean each sentence
     cleaned_sentences = []
-    for sent in summary_sentences:
+    for sent in summary_sentences_final:
         sent = re.sub(r'\s+', ' ', sent)
         if not sent.endswith(('.', '!', '?')):
             sent = sent + '.'
         sent = re.sub(r'\.\.+', '.', sent)
         cleaned_sentences.append(sent)
     
+    # Format based on bullet_points preference
     if bullet_points:
         bullet_list = [f"• {sent}" for sent in cleaned_sentences]
         summary = "\n\n".join(bullet_list)
     else:
         summary = " ".join(cleaned_sentences)
     
+    # Ensure first letter is capitalized
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
 
@@ -345,8 +355,8 @@ if "full_text" not in st.session_state:
     st.session_state.full_text = None
 if "article_title" not in st.session_state:
     st.session_state.article_title = None
-if "nlp_model" not in st.session_state:
-    st.session_state.nlp_model = None
+if "spacy_model" not in st.session_state:
+    st.session_state.spacy_model = None
 if "auto_focus_phrases" not in st.session_state:
     st.session_state.auto_focus_phrases = []
 if "focus_phrases_selected" not in st.session_state:
@@ -363,15 +373,15 @@ if btn_summarize and url:
         cleaned, _ = get_article(url)
         if cleaned:
             full_text, article_title = smart_article_cleaning(cleaned)
-            nlp = load_spacy_lg()
+            spacy_nlp = load_spacy_for_ner()
             
-            if nlp:
-                auto_phrases = auto_detect_focus_phrases(full_text, nlp)
+            if spacy_nlp:
+                auto_phrases = auto_detect_focus_phrases(full_text, spacy_nlp)
                 
                 st.session_state.full_text = full_text
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
-                st.session_state.nlp_model = nlp
+                st.session_state.spacy_model = spacy_nlp
                 st.session_state.article_loaded = True
                 st.session_state.apply_focus = False
                 st.rerun()
@@ -415,7 +425,6 @@ if st.session_state.article_loaded and st.session_state.full_text:
             st.session_state.phrase_boost = boost
             st.session_state.apply_focus = True
         
-        # Generate summary button
         generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
     else:
         generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
@@ -429,10 +438,9 @@ if st.session_state.article_loaded and st.session_state.full_text:
             focus_to_use = None
             boost_to_use = 1.5
         
-        with st.spinner("Generating summary..."):
-            result = textrank_summarize(
+        with st.spinner("Generating summary with Sumy TextRank..."):
+            result = sumy_textrank_summarize(
                 st.session_state.full_text,
-                st.session_state.nlp_model,
                 n_sentences=n_sentences,
                 min_sentence_len=min_sent_len,
                 focus_phrases=focus_to_use,
