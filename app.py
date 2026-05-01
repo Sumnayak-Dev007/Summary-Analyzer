@@ -57,19 +57,23 @@ SPACY_LG_PATH  = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
 
 @st.cache_resource
 def load_spacy_lg():
-    for model_id in ("en_core_web_lg"):
-        try:
-            nlp = spacy.load(model_id)
+    """Load spaCy large model with TextRank pipeline"""
+    try:
+        nlp = spacy.load("en_core_web_lg")
+        # Check if textrank already exists to avoid duplicate
+        if "textrank" not in nlp.pipe_names:
             nlp.add_pipe("textrank")
-            return nlp
-        except OSError:
-            continue
-    st.error(
-        "No spaCy model found. Add this to requirements.txt:\n"
-        "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/"
-        "download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
-    )
-    return None
+        return nlp
+    except OSError:
+        st.error(
+            "en_core_web_lg model not found.\n\n"
+            "Please install it using one of these methods:\n\n"
+            "1. Run: python -m spacy download en_core_web_lg\n\n"
+            "2. Or add to requirements.txt:\n"
+            "   en-core-web-lg @ https://github.com/explosion/spacy-models/releases/"
+            "download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+        )
+        return None
 
 
 def fetch_article(url: str) -> tuple[str | None, str | None]:
