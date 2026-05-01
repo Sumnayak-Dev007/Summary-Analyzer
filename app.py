@@ -372,8 +372,6 @@ def get_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, html
 
 
-# ── Summarization task ────────────────────────────────────────────────────────
-
 if btn_summarize:
     if not url:
         st.warning("Enter a URL first.")
@@ -400,13 +398,17 @@ if btn_summarize:
                 with st.spinner("Analyzing article for key topics..."):
                     auto_focus_phrases = auto_detect_focus_phrases(full_text, nlp)
                 
-                # Initialize session state for focus phrases
+                # Initialize session state for focus phrases if not exists
                 if "focus_phrases_selected" not in st.session_state:
                     st.session_state.focus_phrases_selected = []
                 if "phrase_boost" not in st.session_state:
                     st.session_state.phrase_boost = 1.5
                 if "apply_focus" not in st.session_state:
                     st.session_state.apply_focus = False
+                
+                # Variables to store what to use
+                focus_to_use = None
+                boost_to_use = 1.5
                 
                 # Show detected focus phrases
                 if auto_focus_phrases:
@@ -420,10 +422,14 @@ if btn_summarize:
                         help="Selecting phrases makes the summary emphasize these topics"
                     )
                     
+                    # Ensure boost value is within valid range
+                    current_boost = st.session_state.phrase_boost
+                    if current_boost < 1.0 or current_boost > 2.5:
+                        current_boost = 1.5
+                    
                     boost = st.slider(
                         "Emphasis strength for selected phrases:",
-                        1.0, 2.5, 1.5, 0.1,
-                        value=st.session_state.phrase_boost,
+                        1.0, 2.5, current_boost, 0.1,
                         help="Higher = more weight on sentences containing selected phrases"
                     )
                     
@@ -442,12 +448,6 @@ if btn_summarize:
                     if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
                         focus_to_use = st.session_state.focus_phrases_selected
                         boost_to_use = st.session_state.phrase_boost
-                    else:
-                        focus_to_use = None
-                        boost_to_use = 1.5
-                else:
-                    focus_to_use = None
-                    boost_to_use = 1.5
                 
                 st.divider()
                 
@@ -468,7 +468,6 @@ if btn_summarize:
                 st.session_state["summary_text"] = cleaned
                 st.session_state["article_title"] = article_title
                 st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
-
 
 # ── Render summary result (persists independently) ────────────────────────────
 
