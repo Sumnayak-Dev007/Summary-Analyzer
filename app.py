@@ -54,9 +54,7 @@ SPACY_LG_PATH  = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
 
 @st.cache_resource
 def load_spacy_lg():
-    # Installed via requirements.txt wheel URL — load directly.
-    # Falls back through model sizes so app never shows blank screen.
-    for model_id in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm"):
+    for model_id in ("en_core_web_lg"):
         try:
             nlp = spacy.load(model_id)
             nlp.add_pipe("textrank")
@@ -71,7 +69,7 @@ def load_spacy_lg():
     return None
 
 
-# ── Article fetching ──────────────────────────────────────────────────────────
+
 
 def fetch_article(url: str) -> tuple[str | None, str | None]:
     """
@@ -108,13 +106,13 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-# ── TextRank summarization ────────────────────────────────────────────────────
+
 
 def textrank_summarize(
     text: str,
     nlp,
-    n_sentences: int = 5,
-    min_sentence_len: int = 40,
+    n_sentences: int = 7,
+    min_sentence_len: int = 32,
     focus_phrases: list[str] | None = None,
 ) -> dict:
     proc = psutil.Process(os.getpid())
