@@ -134,13 +134,20 @@ def textrank_summarize(
     bullet_points: bool = False,
 ) -> dict:
     """
-    spaCy + PyTextRank summarization with tunable parameters.
+    spaCy + PyTextRank summarization with improved lead sentence detection.
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
     doc = nlp(text[:100_000])
+    
+    # Get all sentences
+    all_sentences = [sent.text.strip() for sent in doc.sents]
+    
+    # ALWAYS include the first sentence if it's substantial (for news articles)
+    first_sentence = all_sentences[0] if all_sentences else ""
+    has_lead = len(first_sentence) > 40
 
     sent_scores: dict[str, float] = {}
     for phrase in doc._.phrases:
@@ -165,7 +172,6 @@ def textrank_summarize(
         ][:n_sentences]
         summary = " ".join(fallback)
         if bullet_points:
-            # Convert to bullet points if requested
             sentences_list = [s.strip() for s in summary.split('. ') if s.strip()]
             bullet_summary = "\n".join([f"• {s}." for s in sentences_list])
             summary = bullet_summary
@@ -187,30 +193,52 @@ def textrank_summarize(
         return len(ta & tb) / min(len(ta), len(tb))
 
     selected: list[tuple[str, float]] = []
+    
+    # PRIORITY 1: Add the first sentence if it's a good lead
+    if has_lead and first_sentence in sent_scores:
+        selected.append((first_sentence, sent_scores[first_sentence]))
+    elif has_lead:
+        # First sentence not in scores but important - add it anyway
+        selected.append((first_sentence, 1.0))
+    
+    # PRIORITY 2: Add other important sentences
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
+        # Skip if already selected
+        if sent_text == first_sentence:
+            continue
         if any(_overlap(sent_text, s) > diversity_threshold for s, _ in selected):
             continue
         selected.append((sent_text, score))
 
-    all_ordered = [s.text.strip() for s in doc.sents]
+    # Reorder to original article sequence
     selected = sorted(
         selected,
-        key=lambda x: all_ordered.index(x[0]) if x[0] in all_ordered else 9999
+        key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
     )
 
-    summary = " ".join(s for s, _ in selected)
+    # Build summary
+    summary_sentences = [s for s, _ in selected]
+    summary = " ".join(summary_sentences)
+    
+    # Clean up the summary (remove duplicate periods, fix spacing)
+    summary = re.sub(r'\s+', ' ', summary)
+    summary = re.sub(r'\.\s+\.', '.', summary)
+    summary = re.sub(r'\s+\.', '.', summary)
+    
+    # Ensure first sentence is complete (ends with period)
+    if summary and not summary[0].isupper():
+        summary = summary[0].upper() + summary[1:]
     
     # Convert to bullet points if requested
     if bullet_points:
-        # Split into sentences and format as bullet points
         sentences_list = []
-        for sent in summary.split('. '):
+        for sent in summary_sentences:
             sent = sent.strip()
-            if sent and len(sent) > 10:
-                # Add period back if missing
-                if not sent.endswith('.'):
+            if sent:
+                # Ensure sentence ends with period
+                if not sent.endswith(('.', '!', '?')):
                     sent = sent + '.'
                 sentences_list.append(f"• {sent}")
         summary = "\n".join(sentences_list)
@@ -222,7 +250,6 @@ def textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
-
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
