@@ -176,6 +176,7 @@ def textrank_summarize(
 ) -> dict:
     """
     spaCy + PyTextRank summarization with intelligent lead sentence detection.
+    Focus phrases only applied if provided.
     """
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
@@ -206,8 +207,8 @@ def textrank_summarize(
                 key = sent.text.strip()
                 sent_scores[key] = sent_scores.get(key, 0) + phrase.rank
 
-    # Apply focus phrase boosting
-    if focus_phrases:
+    # Apply focus phrase boosting ONLY if focus_phrases provided
+    if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
             for fp in focus_phrases:
                 if fp.lower() in key.lower():
@@ -258,13 +259,7 @@ def textrank_summarize(
     if len(first_proper_sentence) >= min_sentence_len:
         lead_candidates.append((first_proper_sentence, sent_scores.get(first_proper_sentence, 1.2)))
     
-    # Candidate 2: Sentence containing key terms
-    key_terms = ["renewable", "energy", "india", "security", "climate", "finance"]
-    for sent_text, score in top[:5]:
-        if any(term in sent_text.lower() for term in key_terms):
-            lead_candidates.append((sent_text, score))
-    
-    # Candidate 3: Highest scoring sentence
+    # Candidate 2: Highest scoring sentence
     if top:
         lead_candidates.append(top[0])
     
@@ -303,7 +298,6 @@ def textrank_summarize(
     
     # Format based on bullet_points preference
     if bullet_points:
-        # Each sentence as a bullet point with double line breaks
         bullet_list = [f"• {sent}" for sent in cleaned_sentences]
         summary = "\n\n".join(bullet_list)
     else:
@@ -320,6 +314,7 @@ def textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
+
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
@@ -392,7 +387,7 @@ if btn_summarize:
             
             # Show title if detected
             if article_title:
-                st.info(f"📰 **Article:** {article_title}")
+                st.info(f"Article: {article_title}")
             
             # Load spaCy model
             with st.spinner("Loading spaCy model..."):
@@ -405,25 +400,54 @@ if btn_summarize:
                 with st.spinner("Analyzing article for key topics..."):
                     auto_focus_phrases = auto_detect_focus_phrases(full_text, nlp)
                 
+                # Initialize session state for focus phrases
+                if "focus_phrases_selected" not in st.session_state:
+                    st.session_state.focus_phrases_selected = []
+                if "phrase_boost" not in st.session_state:
+                    st.session_state.phrase_boost = 1.5
+                if "apply_focus" not in st.session_state:
+                    st.session_state.apply_focus = False
+                
                 # Show detected focus phrases
                 if auto_focus_phrases:
-                    st.info(f"📌 **Detected key topics:** {', '.join(auto_focus_phrases[:5])}")
+                    st.info(f"Detected key topics: {', '.join(auto_focus_phrases[:5])}")
                     
-                    focus_phrases_selected = st.multiselect(
+                    # Focus phrase selection
+                    selected = st.multiselect(
                         "Select phrases to focus on (optional):",
                         options=auto_focus_phrases,
-                        default=auto_focus_phrases[:2] if len(auto_focus_phrases) >= 2 else auto_focus_phrases,
+                        default=st.session_state.focus_phrases_selected,
                         help="Selecting phrases makes the summary emphasize these topics"
                     )
                     
-                    phrase_boost = st.slider(
+                    boost = st.slider(
                         "Emphasis strength for selected phrases:",
                         1.0, 2.5, 1.5, 0.1,
+                        value=st.session_state.phrase_boost,
                         help="Higher = more weight on sentences containing selected phrases"
                     )
+                    
+                    # Apply button for focus phrases
+                    col1, col2 = st.columns([1, 4])
+                    with col1:
+                        apply_btn = st.button("Apply Focus Phrases", type="secondary")
+                    
+                    if apply_btn:
+                        st.session_state.focus_phrases_selected = selected
+                        st.session_state.phrase_boost = boost
+                        st.session_state.apply_focus = True
+                        st.rerun()
+                    
+                    # Determine which focus phrases to use
+                    if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
+                        focus_to_use = st.session_state.focus_phrases_selected
+                        boost_to_use = st.session_state.phrase_boost
+                    else:
+                        focus_to_use = None
+                        boost_to_use = 1.5
                 else:
-                    focus_phrases_selected = None
-                    phrase_boost = 1.5
+                    focus_to_use = None
+                    boost_to_use = 1.5
                 
                 st.divider()
                 
@@ -433,8 +457,8 @@ if btn_summarize:
                         full_text, nlp,
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
-                        focus_phrases=focus_phrases_selected,
-                        phrase_boost=phrase_boost,
+                        focus_phrases=focus_to_use,
+                        phrase_boost=boost_to_use,
                         diversity_threshold=0.6,
                         bullet_points=bullet_points,
                         title=article_title,
@@ -443,9 +467,10 @@ if btn_summarize:
                 st.session_state["summary_result"] = result
                 st.session_state["summary_text"] = cleaned
                 st.session_state["article_title"] = article_title
-                st.session_state["focus_phrases_used"] = focus_phrases_selected
+                st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
 
 
+# ── Render summary result (persists independently) ────────────────────────────
 
 if "summary_result" in st.session_state:
     result = st.session_state["summary_result"]
@@ -469,7 +494,7 @@ if "summary_result" in st.session_state:
 
     # Show focus phrases used
     if focus_phrases_used:
-        st.info(f"🎯 **Focusing on:** {', '.join(focus_phrases_used)}")
+        st.info(f"Focusing on: {', '.join(focus_phrases_used)} (with {st.session_state.get('phrase_boost', 1.5)}x boost)")
 
     # Display summary (ONLY ONCE)
     if bullet_points:
