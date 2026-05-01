@@ -94,27 +94,148 @@ def fetch_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, downloaded
 
 
-def extract_title_and_body(text: str) -> tuple[str, str]:
+def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     """
-    Simple extraction: First sentence/line is title, rest is body.
-    Returns (body_text, title)
+    Separates title from article body for better summarization.
+    Returns (full_text_for_context, title_for_display)
     """
-    # Try to split by newline first
     lines = text.split('\n')
-    if lines and len(lines[0].strip()) < 100:
+    
+    title = None
+    body = text
+    
+    # Method 1: Check if first line is short and likely a title
+    if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
         title = lines[0].strip()
         body = ' '.join(lines[1:]) if len(lines) > 1 else text
-        return body, title
     
-    # If no newline, try to find first period
-    first_period = text.find('. ')
-    if first_period > 0 and first_period < 100:
-        title = text[:first_period].strip()
-        body = text[first_period + 2:].strip()
-        return body, title
+    # Method 2: Look for quoted title
+    first_part = text.split('. ')[0] if '. ' in text else text[:100]
+    if first_part and (first_part.startswith("'") or first_part.startswith('"') or first_part.startswith('‘')):
+        title = first_part.strip("'\"‘’")
+        body = text[len(first_part):].strip()
+        if body.startswith(('.', '!', '?')):
+            body = body[1:].strip()
     
-    # Fallback
-    return text, None
+    # Method 3: Look for short first sentence (less than 80 chars without ending punctuation)
+    elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
+        title = first_part
+        body = '. '.join(text.split('. ')[1:]) if '. ' in text else text
+    
+    if title:
+        full_text = f"{title}. {body}"
+    else:
+        full_text = body
+    
+    return full_text, title
+
+
+def remove_title_from_text(text: str, title: str | None = None) -> str:
+    """
+    Aggressively remove title/headline from article text.
+    """
+    if not title:
+        # Try to auto-detect title if not provided
+        lines = text.split('\n')
+        if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
+            title = lines[0].strip()
+    
+    clean_text = text
+    
+    if title:
+        # Method 1: Remove title as a line
+        clean_text = clean_text.replace(title, '', 1)
+        
+        # Method 2: Remove title followed by newline
+        clean_text = clean_text.replace(f"{title}\n", '', 1)
+        
+        # Method 3: Remove title followed by period and space
+        clean_text = clean_text.replace(f"{title}. ", '', 1)
+        
+        # Method 4: Remove quoted title
+        title_clean = title.strip("'\"‘’")
+        clean_text = clean_text.replace(f"'{title_clean}' ", '', 1)
+        clean_text = clean_text.replace(f'"{title_clean}" ', '', 1)
+        clean_text = clean_text.replace(f"‘{title_clean}’ ", '', 1)
+    
+    # Method 5: Remove first line if it's short and doesn't end with punctuation
+    lines = clean_text.split('\n')
+    if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
+        clean_text = ' '.join(lines[1:]) if len(lines) > 1 else clean_text
+    
+    # Method 6: Remove first sentence if it's very short and likely a subtitle
+    sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+    if sentences and len(sentences[0]) < 80 and not sentences[0].endswith(('.', '!', '?')):
+        clean_text = ' '.join(sentences[1:]) if len(sentences) > 1 else clean_text
+    
+    # Method 7: Remove any line that looks like a headline (all caps or short with no period)
+    lines = clean_text.split('. ')
+    if lines and len(lines[0]) < 80 and ' ' in lines[0] and not any(c.islower() for c in lines[0][:10]):
+        clean_text = '. '.join(lines[1:]) if len(lines) > 1 else clean_text
+    
+    # Clean up extra spaces
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    
+    return clean_text
+
+
+def calculate_quote_score(sent_text: str) -> float:
+    """Boost score for sentences with well-formed quotes."""
+    score = 0
+    
+    # Check for opening and closing quotes
+    if '"' in sent_text or "'" in sent_text or '“' in sent_text or '”' in sent_text:
+        score += 0.3
+        
+        # Check if quote has attribution (said, added, emphasised, etc.)
+        attribution_words = ['said', 'added', 'emphasised', 'stated', 'told', 'explained', 'noted']
+        if any(word in sent_text.lower() for word in attribution_words):
+            score += 0.2
+            
+        # Check if quote is complete (starts and ends with quotes)
+        quote_chars = ['"', "'", '“', '”']
+        has_opening = any(c in sent_text for c in quote_chars)
+        has_closing = any(c in sent_text for c in quote_chars)
+        if has_opening and has_closing:
+            score += 0.3
+            
+    return score
+
+
+def remove_dateline(text: str) -> str:
+    """Remove datelines like 'New Delhi:', 'Washington:', etc."""
+    # Remove patterns like "City Name:" at beginning
+    text = re.sub(r'^[A-Z][a-z]+(?: [A-Z][a-z]+)?:\s*', '', text)
+    # Remove "New Delhi:" anywhere
+    text = re.sub(r'\bNew Delhi:\s*', '', text)
+    # Remove "City, Country:" patterns
+    text = re.sub(r'^[A-Z][a-z]+, [A-Z][a-z]+:\s*', '', text)
+    return text
+
+
+def is_complete_quote(sent_text: str) -> bool:
+    """Check if a quote in the sentence is complete."""
+    # Count quote characters
+    quote_count = sent_text.count('"') + sent_text.count("'") + sent_text.count('“') + sent_text.count('”')
+    
+    # Even number means balanced quotes
+    if quote_count > 0 and quote_count % 2 == 0:
+        return True
+    return False
+
+def fix_cut_quote(sent_text: str, original_text: str) -> str:
+    """If quote is cut off, try to complete it."""
+    if not is_complete_quote(sent_text):
+        # Try to find the rest of the quote in the original text
+        quote_start = re.search(r'[“"\'][^”"\']*$', sent_text)
+        if quote_start:
+            quote_text = quote_start.group()
+            # Look for closing quote in next sentences
+            next_part = original_text[original_text.find(sent_text) + len(sent_text):]
+            closing = re.search(r'[^”"\']*[”"\']', next_part)
+            if closing:
+                sent_text = sent_text + closing.group()
+    return sent_text
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
@@ -142,22 +263,6 @@ def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
     return top_entities[:7]
 
 
-def fix_quotes(text: str) -> str:
-    """Fix unbalanced quotes in summary."""
-    # Count double quotes
-    dq_count = text.count('"')
-    if dq_count % 2 != 0:
-        text = text + '"'
-    
-    # Count smart quotes
-    sq_open = text.count('“')
-    sq_close = text.count('”')
-    if sq_open > sq_close:
-        text = text + '”'
-    
-    return text
-
-
 def sumy_textrank_summarize(
     text: str,
     n_sentences: int = 6,
@@ -166,17 +271,54 @@ def sumy_textrank_summarize(
     phrase_boost: float = 1.5,
     diversity_threshold: float = 0.6,
     bullet_points: bool = False,
+    title: str | None = None,
 ) -> dict:
-    """Sumy TextRank summarization."""
+    """Sumy TextRank summarization with intelligent lead sentence detection and focus phrases."""
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
-    # Remove common datelines
-    text = re.sub(r'^[A-Z][a-z]+:\s*', '', text)
-    text = re.sub(r'New Delhi:\s*', '', text)
+    # Remove title from the text if present (for summarization only)
+    clean_text_for_summary = text
     
-    parser = PlaintextParser.from_string(text, Tokenizer("english"))
+    if title:
+        # Try multiple patterns to remove the title
+        title_clean = title.strip()
+        
+        # Pattern 1: Title followed by period and space
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}. ", "", 1)
+        
+        # Pattern 2: Title followed by space (no period)
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean} ", "", 1)
+        
+        # Pattern 3: Title with newline
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}\n", "", 1)
+        
+        # Pattern 4: Title at beginning with line break
+        lines = clean_text_for_summary.split('\n')
+        if lines and lines[0].strip() == title_clean:
+            lines = lines[1:]
+            clean_text_for_summary = '\n'.join(lines)
+        
+        # Pattern 5: Remove quoted titles (like 'Title here' followed by space)
+        if title_clean.startswith("'") or title_clean.startswith('"') or title_clean.startswith('‘'):
+            quoted_title = title_clean.strip("'\"‘’")
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title}. ", "", 1)
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title} ", "", 1)
+    
+    # Also remove common title patterns (short first line that doesn't end with period)
+    first_line = clean_text_for_summary.split('\n')[0] if '\n' in clean_text_for_summary else clean_text_for_summary[:100]
+    if len(first_line) < 80 and not first_line.endswith(('.', '!', '?')):
+        # Remove the first line as it's likely a title
+        if '\n' in clean_text_for_summary:
+            clean_text_for_summary = '\n'.join(clean_text_for_summary.split('\n')[1:])
+        else:
+            # Find first period to skip the title
+            period_pos = clean_text_for_summary.find('. ')
+            if period_pos > 0 and period_pos < 100:
+                clean_text_for_summary = clean_text_for_summary[period_pos + 2:]
+    
+    parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
     summarizer = TextRankSummarizer()
     
     all_sentences = [str(sent).strip() for sent in parser.document.sentences]
@@ -198,7 +340,19 @@ def sumy_textrank_summarize(
 
     if not sent_scores:
         fallback = [s for s in all_sentences if len(s) >= min_sentence_len][:n_sentences]
-        summary = " ".join(fallback)
+        
+        if bullet_points:
+            sentences_list = []
+            for sent in fallback:
+                sent = sent.strip()
+                if sent:
+                    if not sent.endswith(('.', '!', '?')):
+                        sent = sent + '.'
+                    sentences_list.append(f"• {sent}")
+            summary = "\n\n".join(sentences_list)
+        else:
+            summary = " ".join(fallback)
+        
         return {
             "summary": summary,
             "sentences": [(s, 0.0) for s in fallback],
@@ -217,10 +371,11 @@ def sumy_textrank_summarize(
 
     selected: list[tuple[str, float]] = []
     
-    # Lead sentence selection
     lead_candidates = []
+    
     if len(first_proper_sentence) >= min_sentence_len:
         lead_candidates.append((first_proper_sentence, sent_scores.get(first_proper_sentence, 1.2)))
+    
     if top:
         lead_candidates.append(top[0])
     
@@ -258,8 +413,6 @@ def sumy_textrank_summarize(
     else:
         summary = " ".join(cleaned_sentences)
     
-    # Fix quotes and capitalization
-    summary = fix_quotes(summary)
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
 
@@ -354,13 +507,13 @@ if btn_summarize and url:
     with st.spinner("Fetching and analyzing article..."):
         cleaned, _ = get_article(url)
         if cleaned:
-            body_text, article_title = extract_title_and_body(cleaned)
+            full_text, article_title = smart_article_cleaning(cleaned)
             spacy_nlp = load_spacy_for_ner()
             
             if spacy_nlp:
-                auto_phrases = auto_detect_focus_phrases(body_text, spacy_nlp)
+                auto_phrases = auto_detect_focus_phrases(full_text, spacy_nlp)
                 
-                st.session_state.full_text = body_text
+                st.session_state.full_text = full_text
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
                 st.session_state.spacy_model = spacy_nlp
@@ -368,19 +521,21 @@ if btn_summarize and url:
                 st.session_state.apply_focus = False
                 st.session_state.initial_summary_generated = False
                 
+                # Generate initial summary immediately
                 with st.spinner("Generating initial summary..."):
                     initial_result = sumy_textrank_summarize(
-                        body_text,
+                        full_text,
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
                         focus_phrases=None,
                         phrase_boost=1.5,
                         diversity_threshold=0.6,
                         bullet_points=bullet_points,
+                        title=article_title,
                     )
                 
                 st.session_state["summary_result"] = initial_result
-                st.session_state["summary_text"] = body_text
+                st.session_state["summary_text"] = full_text
                 st.session_state["focus_phrases_used"] = []
                 st.session_state.initial_summary_generated = True
                 
@@ -406,6 +561,8 @@ if st.session_state.article_loaded and st.session_state.full_text:
         )
         
         current_boost = st.session_state.phrase_boost
+        if current_boost < 1.0 or current_boost > 2.5:
+            current_boost = 1.5
         
         boost = st.slider(
             "Emphasis strength for selected phrases:",
@@ -439,6 +596,7 @@ if st.session_state.article_loaded and st.session_state.full_text:
                     phrase_boost=boost_to_use,
                     diversity_threshold=0.6,
                     bullet_points=bullet_points,
+                    title=st.session_state.article_title,
                 )
             
             st.session_state["summary_result"] = new_result
