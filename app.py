@@ -101,27 +101,20 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     """
     lines = text.split('. ')
     
-    # Try to detect title (first segment that's shorter and likely a headline)
     title = None
     body = text
     
-    # Check if first part looks like a title (quoted, short, no verb)
     first_part = lines[0].strip() if lines else ""
     
     if first_part and (first_part.startswith("'") or first_part.startswith('"') or first_part.startswith('‘')):
-        # Extract title (remove quotes)
         title = first_part.strip("'\"‘’")
-        # Remove title from body
         body = text[len(first_part):].strip()
         if body.startswith(('.', '!', '?')):
             body = body[1:].strip()
-    
-    # Also check for title pattern: short line (< 80 chars) without ending punctuation
     elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
         title = first_part
         body = '. '.join(lines[1:]) if len(lines) > 1 else text
     
-    # If title found, prepend it with proper separation for context
     if title:
         full_text = f"{title}. {body}"
     else:
@@ -131,13 +124,9 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
-    """
-    Automatically detect important focus phrases from the article.
-    Returns list of important named entities and key phrases.
-    """
+    """Automatically detect important focus phrases from the article."""
     doc = nlp(text[:50000])
     
-    # Collect named entities (people, organizations, places, products, events)
     entities = []
     for ent in doc.ents:
         if ent.label_ in ["PERSON", "ORG", "GPE", "PRODUCT", "EVENT", "NORP", "LOC"]:
@@ -145,14 +134,10 @@ def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
             if 3 < len(text_clean) < 40:
                 entities.append(text_clean)
     
-    # Count frequency of each entity
     from collections import Counter
     entity_counts = Counter(entities)
-    
-    # Get top entities by frequency
     top_entities = [entity for entity, count in entity_counts.most_common(10)]
     
-    # If no entities found, extract important noun phrases
     if not top_entities:
         noun_phrases = []
         for chunk in doc.noun_chunks:
@@ -174,24 +159,16 @@ def textrank_summarize(
     bullet_points: bool = False,
     title: str | None = None,
 ) -> dict:
-    """
-    spaCy + PyTextRank summarization with intelligent lead sentence detection.
-    Focus phrases only applied if provided.
-    """
+    """spaCy + PyTextRank summarization with intelligent lead sentence detection."""
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
-    # Process with title for better context
     doc = nlp(text[:100_000])
-    
-    # Get all sentences
     all_sentences = [sent.text.strip() for sent in doc.sents]
     
-    # Find the proper lead sentence (skip title if embedded)
     first_proper_sentence = all_sentences[0] if all_sentences else ""
     
-    # If first sentence contains the title as prefix, extract the actual lead
     if title and title in first_proper_sentence:
         lead_start = first_proper_sentence.find(title) + len(title)
         if lead_start > 0 and lead_start < len(first_proper_sentence):
@@ -207,7 +184,6 @@ def textrank_summarize(
                 key = sent.text.strip()
                 sent_scores[key] = sent_scores.get(key, 0) + phrase.rank
 
-    # Apply focus phrase boosting ONLY if focus_phrases provided
     if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
             for fp in focus_phrases:
@@ -252,23 +228,18 @@ def textrank_summarize(
 
     selected: list[tuple[str, float]] = []
     
-    # Intelligent lead sentence selection
     lead_candidates = []
     
-    # Candidate 1: First proper sentence
     if len(first_proper_sentence) >= min_sentence_len:
         lead_candidates.append((first_proper_sentence, sent_scores.get(first_proper_sentence, 1.2)))
     
-    # Candidate 2: Highest scoring sentence
     if top:
         lead_candidates.append(top[0])
     
-    # Pick best lead (highest score)
     if lead_candidates:
         best_lead = max(lead_candidates, key=lambda x: x[1])
         selected.append(best_lead)
     
-    # Add other important sentences
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
@@ -278,16 +249,13 @@ def textrank_summarize(
             continue
         selected.append((sent_text, score))
 
-    # Reorder to original article sequence
     selected = sorted(
         selected,
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
     )
 
-    # Build summary sentences
     summary_sentences = [s for s, _ in selected]
     
-    # Clean each sentence
     cleaned_sentences = []
     for sent in summary_sentences:
         sent = re.sub(r'\s+', ' ', sent)
@@ -296,14 +264,12 @@ def textrank_summarize(
         sent = re.sub(r'\.\.+', '.', sent)
         cleaned_sentences.append(sent)
     
-    # Format based on bullet_points preference
     if bullet_points:
         bullet_list = [f"• {sent}" for sent in cleaned_sentences]
         summary = "\n\n".join(bullet_list)
     else:
         summary = " ".join(cleaned_sentences)
     
-    # Ensure first letter is capitalized
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
 
@@ -372,114 +338,124 @@ def get_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, html
 
 
-if btn_summarize:
-    if not url:
-        st.warning("Enter a URL first.")
-    else:
-        cleaned, _ = get_article(url)
-        if not cleaned:
-            st.error("Could not extract content from this URL.")
-        else:
-            # Clean article and separate title
-            full_text, article_title = smart_article_cleaning(cleaned)
-            
-            # Show title if detected
-            if article_title:
-                st.info(f"Article: {article_title}")
-            
-            # Load spaCy model
-            with st.spinner("Loading spaCy model..."):
-                nlp = load_spacy_lg()
-            
-            if nlp is None:
-                st.error("spaCy model could not be loaded.")
-            else:
-                # Auto-detect focus phrases
-                with st.spinner("Analyzing article for key topics..."):
-                    auto_focus_phrases = auto_detect_focus_phrases(full_text, nlp)
-                
-                # Initialize session state for focus phrases if not exists
-                if "focus_phrases_selected" not in st.session_state:
-                    st.session_state.focus_phrases_selected = []
-                if "phrase_boost" not in st.session_state:
-                    st.session_state.phrase_boost = 1.5
-                if "apply_focus" not in st.session_state:
-                    st.session_state.apply_focus = False
-                
-                # Variables to store what to use
-                focus_to_use = None
-                boost_to_use = 1.5
-                
-                # Show detected focus phrases
-                if auto_focus_phrases:
-                    st.info(f"Detected key topics: {', '.join(auto_focus_phrases[:5])}")
-                    
-                    # Focus phrase selection
-                    selected = st.multiselect(
-                        "Select phrases to focus on (optional):",
-                        options=auto_focus_phrases,
-                        default=st.session_state.focus_phrases_selected,
-                        help="Selecting phrases makes the summary emphasize these topics"
-                    )
-                    
-                    # Ensure boost value is within valid range
-                    current_boost = st.session_state.phrase_boost
-                    if current_boost < 1.0 or current_boost > 2.5:
-                        current_boost = 1.5
-                    
-                    boost = st.slider(
-                        "Emphasis strength for selected phrases:",
-                        1.0, 2.5, current_boost, 0.1,
-                        help="Higher = more weight on sentences containing selected phrases"
-                    )
-                    
-                    # Apply button for focus phrases
-                    col1, col2 = st.columns([1, 4])
-                    with col1:
-                        apply_btn = st.button("Apply Focus Phrases", type="secondary")
-                    
-                    if apply_btn:
-                        st.session_state.focus_phrases_selected = selected
-                        st.session_state.phrase_boost = boost
-                        st.session_state.apply_focus = True
-                        st.rerun()
-                    
-                    # Determine which focus phrases to use
-                    if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
-                        focus_to_use = st.session_state.focus_phrases_selected
-                        boost_to_use = st.session_state.phrase_boost
-                
-                st.divider()
-                
-                # Run summarization
-                with st.spinner("Generating summary..."):
-                    result = textrank_summarize(
-                        full_text, nlp,
-                        n_sentences=n_sentences,
-                        min_sentence_len=min_sent_len,
-                        focus_phrases=focus_to_use,
-                        phrase_boost=boost_to_use,
-                        diversity_threshold=0.6,
-                        bullet_points=bullet_points,
-                        title=article_title,
-                    )
-                
-                st.session_state["summary_result"] = result
-                st.session_state["summary_text"] = cleaned
-                st.session_state["article_title"] = article_title
-                st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
+# Initialize session state variables
+if "article_loaded" not in st.session_state:
+    st.session_state.article_loaded = False
+if "full_text" not in st.session_state:
+    st.session_state.full_text = None
+if "article_title" not in st.session_state:
+    st.session_state.article_title = None
+if "nlp_model" not in st.session_state:
+    st.session_state.nlp_model = None
+if "auto_focus_phrases" not in st.session_state:
+    st.session_state.auto_focus_phrases = []
+if "focus_phrases_selected" not in st.session_state:
+    st.session_state.focus_phrases_selected = []
+if "phrase_boost" not in st.session_state:
+    st.session_state.phrase_boost = 1.5
+if "apply_focus" not in st.session_state:
+    st.session_state.apply_focus = False
 
-# ── Render summary result (persists independently) ────────────────────────────
+
+# Load article when button is clicked
+if btn_summarize and url:
+    with st.spinner("Fetching and analyzing article..."):
+        cleaned, _ = get_article(url)
+        if cleaned:
+            full_text, article_title = smart_article_cleaning(cleaned)
+            nlp = load_spacy_lg()
+            
+            if nlp:
+                auto_phrases = auto_detect_focus_phrases(full_text, nlp)
+                
+                st.session_state.full_text = full_text
+                st.session_state.article_title = article_title
+                st.session_state.auto_focus_phrases = auto_phrases
+                st.session_state.nlp_model = nlp
+                st.session_state.article_loaded = True
+                st.session_state.apply_focus = False
+                st.rerun()
+        else:
+            st.error("Could not extract content from this URL.")
+
+# Display focus phrase selection UI (outside button condition)
+if st.session_state.article_loaded and st.session_state.full_text:
+    
+    if st.session_state.article_title:
+        st.info(f"Article: {st.session_state.article_title}")
+    
+    if st.session_state.auto_focus_phrases:
+        st.info(f"Detected key topics: {', '.join(st.session_state.auto_focus_phrases[:5])}")
+        
+        selected = st.multiselect(
+            "Select phrases to focus on (optional):",
+            options=st.session_state.auto_focus_phrases,
+            default=st.session_state.focus_phrases_selected,
+            help="Selecting phrases makes the summary emphasize these topics",
+            key="focus_phrases_multiselect"
+        )
+        
+        current_boost = st.session_state.phrase_boost
+        if current_boost < 1.0 or current_boost > 2.5:
+            current_boost = 1.5
+        
+        boost = st.slider(
+            "Emphasis strength for selected phrases:",
+            1.0, 2.5, current_boost, 0.1,
+            help="Higher = more weight on sentences containing selected phrases",
+            key="phrase_boost_slider"
+        )
+        
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            apply_btn = st.button("Apply Focus Phrases", key="apply_focus_btn")
+        
+        if apply_btn:
+            st.session_state.focus_phrases_selected = selected
+            st.session_state.phrase_boost = boost
+            st.session_state.apply_focus = True
+        
+        # Generate summary button
+        generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
+    else:
+        generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
+    
+    # Generate summary when button is clicked
+    if generate_btn:
+        if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
+            focus_to_use = st.session_state.focus_phrases_selected
+            boost_to_use = st.session_state.phrase_boost
+        else:
+            focus_to_use = None
+            boost_to_use = 1.5
+        
+        with st.spinner("Generating summary..."):
+            result = textrank_summarize(
+                st.session_state.full_text,
+                st.session_state.nlp_model,
+                n_sentences=n_sentences,
+                min_sentence_len=min_sent_len,
+                focus_phrases=focus_to_use,
+                phrase_boost=boost_to_use,
+                diversity_threshold=0.6,
+                bullet_points=bullet_points,
+                title=st.session_state.article_title,
+            )
+        
+        st.session_state["summary_result"] = result
+        st.session_state["summary_text"] = st.session_state.full_text
+        st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
+
+
+# ── Render summary result ─────────────────────────────────────────────────────
 
 if "summary_result" in st.session_state:
     result = st.session_state["summary_result"]
     cleaned = st.session_state["summary_text"]
-    article_title = st.session_state.get("article_title", "")
     focus_phrases_used = st.session_state.get("focus_phrases_used", [])
 
     st.header("Summary")
 
-    # Show metrics
     c1, c2, c3 = st.columns(3)
     with c1: 
         st.metric("Time", f"{result['elapsed_s']}s")
@@ -491,11 +467,9 @@ if "summary_result" in st.session_state:
         else:
             st.metric("Sentences", len(result["sentences"]))
 
-    # Show focus phrases used
     if focus_phrases_used:
         st.info(f"Focusing on: {', '.join(focus_phrases_used)} (with {st.session_state.get('phrase_boost', 1.5)}x boost)")
 
-    # Display summary (ONLY ONCE)
     if bullet_points:
         st.markdown("### Summary (Bullet Points)")
         st.markdown(result["summary"])
@@ -506,7 +480,6 @@ if "summary_result" in st.session_state:
     with st.expander("Full article text"):
         st.write(cleaned)
 
-    # Show sentence scores for debugging
     if result["sentences"] and any(s > 0 for _, s in result["sentences"]):
         with st.expander("Sentence Scores (Debug)"):
             max_score = max(s for _, s in result["sentences"]) or 1
