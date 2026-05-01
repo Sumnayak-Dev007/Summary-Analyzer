@@ -6,7 +6,9 @@ import psutil
 import streamlit as st
 import trafilatura
 import spacy
-import pytextrank
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.text_rank import TextRankSummarizer
 
 st.set_page_config(
     page_title="Article Analyzer",
@@ -53,12 +55,10 @@ SPACY_LG_PATH  = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
 
 
 @st.cache_resource
-def load_spacy_lg():
-    """Load spaCy large model with TextRank pipeline"""
+def load_spacy_for_ner():
+    """Load spaCy large model only for NER (entity detection for focus phrases)"""
     try:
         nlp = spacy.load("en_core_web_lg")
-        if "textrank" not in nlp.pipe_names:
-            nlp.add_pipe("textrank")
         return nlp
     except OSError:
         st.error(
@@ -99,21 +99,28 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     Separates title from article body for better summarization.
     Returns (full_text_for_context, title_for_display)
     """
-    lines = text.split('. ')
+    lines = text.split('\n')
     
     title = None
     body = text
     
-    first_part = lines[0].strip() if lines else ""
+    # Method 1: Check if first line is short and likely a title
+    if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
+        title = lines[0].strip()
+        body = ' '.join(lines[1:]) if len(lines) > 1 else text
     
+    # Method 2: Look for quoted title
+    first_part = text.split('. ')[0] if '. ' in text else text[:100]
     if first_part and (first_part.startswith("'") or first_part.startswith('"') or first_part.startswith('‘')):
         title = first_part.strip("'\"‘’")
         body = text[len(first_part):].strip()
         if body.startswith(('.', '!', '?')):
             body = body[1:].strip()
+    
+    # Method 3: Look for short first sentence (less than 80 chars without ending punctuation)
     elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
         title = first_part
-        body = '. '.join(lines[1:]) if len(lines) > 1 else text
+        body = '. '.join(text.split('. ')[1:]) if '. ' in text else text
     
     if title:
         full_text = f"{title}. {body}"
@@ -124,7 +131,7 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
-    """Automatically detect important focus phrases from the article."""
+    """Automatically detect important focus phrases from the article using spaCy NER."""
     doc = nlp(text[:50000])
     
     entities = []
@@ -148,9 +155,8 @@ def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
     return top_entities[:7]
 
 
-def textrank_summarize(
+def sumy_textrank_summarize(
     text: str,
-    nlp,
     n_sentences: int = 6,
     min_sentence_len: int = 32,
     focus_phrases: list[str] | None = None,
@@ -159,44 +165,73 @@ def textrank_summarize(
     bullet_points: bool = False,
     title: str | None = None,
 ) -> dict:
-    """spaCy + PyTextRank summarization with intelligent lead sentence detection."""
+    """Sumy TextRank summarization with intelligent lead sentence detection and focus phrases."""
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
-    doc = nlp(text[:100_000])
-    all_sentences = [sent.text.strip() for sent in doc.sents]
+    # Remove title from the text if present (for summarization only)
+    clean_text_for_summary = text
     
+    if title:
+        # Try multiple patterns to remove the title
+        title_clean = title.strip()
+        
+        # Pattern 1: Title followed by period and space
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}. ", "", 1)
+        
+        # Pattern 2: Title followed by space (no period)
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean} ", "", 1)
+        
+        # Pattern 3: Title with newline
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}\n", "", 1)
+        
+        # Pattern 4: Title at beginning with line break
+        lines = clean_text_for_summary.split('\n')
+        if lines and lines[0].strip() == title_clean:
+            lines = lines[1:]
+            clean_text_for_summary = '\n'.join(lines)
+        
+        # Pattern 5: Remove quoted titles (like 'Title here' followed by space)
+        if title_clean.startswith("'") or title_clean.startswith('"') or title_clean.startswith('‘'):
+            quoted_title = title_clean.strip("'\"‘’")
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title}. ", "", 1)
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title} ", "", 1)
+    
+    # Also remove common title patterns (short first line that doesn't end with period)
+    first_line = clean_text_for_summary.split('\n')[0] if '\n' in clean_text_for_summary else clean_text_for_summary[:100]
+    if len(first_line) < 80 and not first_line.endswith(('.', '!', '?')):
+        # Remove the first line as it's likely a title
+        if '\n' in clean_text_for_summary:
+            clean_text_for_summary = '\n'.join(clean_text_for_summary.split('\n')[1:])
+        else:
+            # Find first period to skip the title
+            period_pos = clean_text_for_summary.find('. ')
+            if period_pos > 0 and period_pos < 100:
+                clean_text_for_summary = clean_text_for_summary[period_pos + 2:]
+    
+    parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
+    summarizer = TextRankSummarizer()
+    
+    all_sentences = [str(sent).strip() for sent in parser.document.sentences]
     first_proper_sentence = all_sentences[0] if all_sentences else ""
+
+    summary_sentences = summarizer(parser.document, n_sentences * 2)
     
-    if title and title in first_proper_sentence:
-        lead_start = first_proper_sentence.find(title) + len(title)
-        if lead_start > 0 and lead_start < len(first_proper_sentence):
-            actual_lead = first_proper_sentence[lead_start:].strip()
-            actual_lead = actual_lead.lstrip('.!? ')
-            if actual_lead and len(actual_lead) > 30:
-                first_proper_sentence = actual_lead
-
     sent_scores: dict[str, float] = {}
-    for phrase in doc._.phrases:
-        for sent in doc.sents:
-            if phrase.text.lower() in sent.text.lower():
-                key = sent.text.strip()
-                sent_scores[key] = sent_scores.get(key, 0) + phrase.rank
-
+    for sent in summary_sentences:
+        sent_text = str(sent).strip()
+        if len(sent_text) >= min_sentence_len:
+            sent_scores[sent_text] = sent_scores.get(sent_text, 0) + 1
+    
     if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
             for fp in focus_phrases:
                 if fp.lower() in key.lower():
                     sent_scores[key] *= phrase_boost
 
-    sent_scores = {s: sc for s, sc in sent_scores.items() if len(s) >= min_sentence_len}
-
     if not sent_scores:
-        fallback = [
-            s.text.strip() for s in doc.sents
-            if len(s.text.strip()) >= min_sentence_len
-        ][:n_sentences]
+        fallback = [s for s in all_sentences if len(s) >= min_sentence_len][:n_sentences]
         
         if bullet_points:
             sentences_list = []
@@ -254,10 +289,10 @@ def textrank_summarize(
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
     )
 
-    summary_sentences = [s for s, _ in selected]
+    summary_sentences_final = [s for s, _ in selected]
     
     cleaned_sentences = []
-    for sent in summary_sentences:
+    for sent in summary_sentences_final:
         sent = re.sub(r'\s+', ' ', sent)
         if not sent.endswith(('.', '!', '?')):
             sent = sent + '.'
@@ -345,8 +380,8 @@ if "full_text" not in st.session_state:
     st.session_state.full_text = None
 if "article_title" not in st.session_state:
     st.session_state.article_title = None
-if "nlp_model" not in st.session_state:
-    st.session_state.nlp_model = None
+if "spacy_model" not in st.session_state:
+    st.session_state.spacy_model = None
 if "auto_focus_phrases" not in st.session_state:
     st.session_state.auto_focus_phrases = []
 if "focus_phrases_selected" not in st.session_state:
@@ -355,30 +390,52 @@ if "phrase_boost" not in st.session_state:
     st.session_state.phrase_boost = 1.5
 if "apply_focus" not in st.session_state:
     st.session_state.apply_focus = False
+if "initial_summary_generated" not in st.session_state:
+    st.session_state.initial_summary_generated = False
 
 
-# Load article when button is clicked
+# Load article and generate initial summary when button is clicked
 if btn_summarize and url:
     with st.spinner("Fetching and analyzing article..."):
         cleaned, _ = get_article(url)
         if cleaned:
             full_text, article_title = smart_article_cleaning(cleaned)
-            nlp = load_spacy_lg()
+            spacy_nlp = load_spacy_for_ner()
             
-            if nlp:
-                auto_phrases = auto_detect_focus_phrases(full_text, nlp)
+            if spacy_nlp:
+                auto_phrases = auto_detect_focus_phrases(full_text, spacy_nlp)
                 
                 st.session_state.full_text = full_text
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
-                st.session_state.nlp_model = nlp
+                st.session_state.spacy_model = spacy_nlp
                 st.session_state.article_loaded = True
                 st.session_state.apply_focus = False
+                st.session_state.initial_summary_generated = False
+                
+                # Generate initial summary immediately
+                with st.spinner("Generating initial summary..."):
+                    initial_result = sumy_textrank_summarize(
+                        full_text,
+                        n_sentences=n_sentences,
+                        min_sentence_len=min_sent_len,
+                        focus_phrases=None,
+                        phrase_boost=1.5,
+                        diversity_threshold=0.6,
+                        bullet_points=bullet_points,
+                        title=article_title,
+                    )
+                
+                st.session_state["summary_result"] = initial_result
+                st.session_state["summary_text"] = full_text
+                st.session_state["focus_phrases_used"] = []
+                st.session_state.initial_summary_generated = True
+                
                 st.rerun()
         else:
             st.error("Could not extract content from this URL.")
 
-# Display focus phrase selection UI (outside button condition)
+# Display focus phrase selection UI (only after article is loaded)
 if st.session_state.article_loaded and st.session_state.full_text:
     
     if st.session_state.article_title:
@@ -408,43 +465,35 @@ if st.session_state.article_loaded and st.session_state.full_text:
         
         col1, col2 = st.columns([1, 4])
         with col1:
-            apply_btn = st.button("Apply Focus Phrases", key="apply_focus_btn")
+            apply_btn = st.button("Apply Focus Phrases & Regenerate", key="apply_focus_btn")
         
         if apply_btn:
             st.session_state.focus_phrases_selected = selected
             st.session_state.phrase_boost = boost
             st.session_state.apply_focus = True
-        
-        # Generate summary button
-        generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
-    else:
-        generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
-    
-    # Generate summary when button is clicked
-    if generate_btn:
-        if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
-            focus_to_use = st.session_state.focus_phrases_selected
-            boost_to_use = st.session_state.phrase_boost
-        else:
-            focus_to_use = None
-            boost_to_use = 1.5
-        
-        with st.spinner("Generating summary..."):
-            result = textrank_summarize(
-                st.session_state.full_text,
-                st.session_state.nlp_model,
-                n_sentences=n_sentences,
-                min_sentence_len=min_sent_len,
-                focus_phrases=focus_to_use,
-                phrase_boost=boost_to_use,
-                diversity_threshold=0.6,
-                bullet_points=bullet_points,
-                title=st.session_state.article_title,
-            )
-        
-        st.session_state["summary_result"] = result
-        st.session_state["summary_text"] = st.session_state.full_text
-        st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
+            
+            with st.spinner("Regenerating summary with focus phrases..."):
+                if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
+                    focus_to_use = st.session_state.focus_phrases_selected
+                    boost_to_use = st.session_state.phrase_boost
+                else:
+                    focus_to_use = None
+                    boost_to_use = 1.5
+                
+                new_result = sumy_textrank_summarize(
+                    st.session_state.full_text,
+                    n_sentences=n_sentences,
+                    min_sentence_len=min_sent_len,
+                    focus_phrases=focus_to_use,
+                    phrase_boost=boost_to_use,
+                    diversity_threshold=0.6,
+                    bullet_points=bullet_points,
+                    title=st.session_state.article_title,
+                )
+            
+            st.session_state["summary_result"] = new_result
+            st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
+            st.rerun()
 
 
 # ── Render summary result ─────────────────────────────────────────────────────
