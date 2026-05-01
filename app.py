@@ -7,6 +7,9 @@ import streamlit as st
 import trafilatura
 import spacy
 import pytextrank
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.text_rank import TextRankSummarizer
 
 st.set_page_config(
     page_title="Article Analyzer",
@@ -69,8 +72,6 @@ def load_spacy_lg():
     return None
 
 
-
-
 def fetch_article(url: str) -> tuple[str | None, str | None]:
     """
     Returns (cleaned_text, raw_html) — raw_html kept so trafilatura
@@ -106,6 +107,42 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def sumy_textrank_summarize(text: str, n_sentences: int = 5) -> tuple[str, dict]:
+    """Sumy's TextRank implementation (keyword-based)"""
+    process = psutil.Process(os.getpid())
+    ram_before = process.memory_info().rss / 1024 / 1024
+    start = time.time()
+    
+    try:
+        parser = PlaintextParser.from_string(text, Tokenizer("english"))
+        summarizer = TextRankSummarizer()
+        summary_sentences = summarizer(parser.document, n_sentences)
+        
+        # Get all sentences in original order
+        original_sentences = [str(sent) for sent in parser.document.sentences]
+        
+        # Extract summary sentences
+        summary_texts = [str(s) for s in summary_sentences if len(str(s)) > 40]
+        
+        # Preserve original order
+        ordered = []
+        for sent in summary_texts:
+            try:
+                idx = original_sentences.index(sent)
+                ordered.append((idx, sent))
+            except ValueError:
+                continue
+        
+        ordered.sort(key=lambda x: x[0])
+        summary = " ".join([s[1] for s in ordered]).strip()
+        
+    except Exception as e:
+        summary = f"Error: {e}"
+    
+    elapsed = round(time.time() - start, 3)
+    ram_used = round(process.memory_info().rss / 1024 / 1024 - ram_before, 2)
+    
+    return summary, {"elapsed": elapsed, "ram": ram_used, "words": len(summary.split())}
 
 
 def textrank_summarize(
@@ -247,20 +284,114 @@ if btn_summarize:
         if not cleaned:
             st.error("Could not extract content from this URL.")
         else:
+            # Run Sumy TextRank
+            with st.spinner("Running Sumy TextRank..."):
+                sumy_summary, sumy_metrics = sumy_textrank_summarize(cleaned, n_sentences)
+            
+            # Run spaCy PyTextRank
             with st.spinner("Loading spaCy model..."):
                 nlp = load_spacy_lg()
+            
             if nlp is None:
                 st.error("spaCy model could not be loaded. Check requirements.txt.")
             else:
-                with st.spinner("Running TextRank..."):
+                with st.spinner("Running spaCy PyTextRank..."):
                     result = textrank_summarize(
                         cleaned, nlp,
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
                         focus_phrases=focus_phrases,
                     )
-                st.session_state["summary_result"]  = result
-                st.session_state["summary_text"]    = cleaned
+                
+                # Store both results
+                st.session_state["sumy_summary"] = sumy_summary
+                st.session_state["sumy_metrics"] = sumy_metrics
+                st.session_state["summary_result"] = result
+                st.session_state["summary_text"] = cleaned
+
+
+# ── Render summary result (persists independently) ────────────────────────────
+
+if "summary_result" in st.session_state:
+    result = st.session_state["summary_result"]
+    sumy_summary = st.session_state.get("sumy_summary", "")
+    sumy_metrics = st.session_state.get("sumy_metrics", {})
+    cleaned = st.session_state["summary_text"]
+
+    st.header("TextRank Method Comparison")
+    
+    # Display side by side
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### Sumy TextRank")
+        st.markdown("*Keyword-based TextRank*")
+        
+        if sumy_metrics:
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Time", f"{sumy_metrics.get('elapsed', 0)}s")
+            with m2:
+                st.metric("RAM", f"{sumy_metrics.get('ram', 0)} MB")
+            with m3:
+                st.metric("Words", sumy_metrics.get('words', 0))
+        
+        st.markdown("**Summary:**")
+        st.markdown(sumy_summary if sumy_summary else "No summary generated")
+    
+    with col2:
+        st.markdown("### spaCy PyTextRank")
+        st.markdown("*Phrase-based TextRank*")
+        
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("Time", f"{result['elapsed_s']}s")
+        with m2:
+            st.metric("RAM delta", f"{result['ram_mb']} MB")
+        with m3:
+            st.metric("Sentences", len(result["sentences"]))
+        
+        st.markdown("**Summary:**")
+        st.markdown(result["summary"])
+    
+    st.divider()
+    
+    with st.expander("Full article text"):
+        st.write(cleaned)
+    
+    # Show sentence scores for spaCy
+    if result["sentences"] and any(s > 0 for _, s in result["sentences"]):
+        with st.expander("spaCy PyTextRank - Sentence Scores"):
+            max_score = max(s for _, s in result["sentences"]) or 1
+            for sent_text, score in sorted(result["sentences"], key=lambda x: -x[1]):
+                bar_w = int(score / max_score * 100)
+                st.markdown(
+                    f'<div style="margin-bottom:10px">'
+                    f'<div style="font-size:13px;margin-bottom:4px">{sent_text}</div>'
+                    f'<div style="display:flex;align-items:center;gap:8px">'
+                    f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
+                    f'<div style="width:{bar_w}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
+                    f'</div>'
+                    f'<span style="font-family:monospace;font-size:11px;color:#666">{score:.4f}</span>'
+                    f'</div></div>',
+                    unsafe_allow_html=True
+                )
+    
+    # Key differences explanation
+    with st.expander("Key Differences Between Methods"):
+        st.markdown("""
+        **Sumy TextRank:**
+        - Builds graph where nodes are **words**
+        - Connects words that appear near each other
+        - Good for: General content, faster processing
+        - May miss named entities
+        
+        **spaCy PyTextRank:**
+        - Builds graph where nodes are **noun phrases**
+        - Uses grammatical dependencies (subject, object, etc.)
+        - Good for: Articles with many named entities (people, places, organizations)
+        - Better captures quotes and important names
+        """)
 
 
 # ── Category extraction task ──────────────────────────────────────────────────
@@ -286,42 +417,6 @@ if btn_categories:
             st.session_state["cat_result"] = cat_result
             st.session_state["cat_text"] = cleaned
             render_cat_results(cat_result)
-
-
-# ── Render summary result (persists independently) ────────────────────────────
-
-if "summary_result" in st.session_state:
-    result  = st.session_state["summary_result"]
-    cleaned = st.session_state["summary_text"]
-
-    st.header("Summary")
-
-    c1, c2, c3 = st.columns(3)
-    with c1: st.metric("Time",      f"{result['elapsed_s']}s")
-    with c2: st.metric("RAM delta", f"{result['ram_mb']} MB")
-    with c3: st.metric("Sentences", len(result["sentences"]))
-
-    st.markdown(result["summary"])
-
-    with st.expander("Full article text"):
-        st.write(cleaned)
-
-    if result["sentences"] and any(s > 0 for _, s in result["sentences"]):
-        with st.expander("Sentence scores"):
-            max_score = max(s for _, s in result["sentences"]) or 1
-            for sent_text, score in sorted(result["sentences"], key=lambda x: -x[1]):
-                bar_w = int(score / max_score * 100)
-                st.markdown(
-                    f'<div style="margin-bottom:10px">'
-                    f'<div style="font-size:13px;margin-bottom:4px">{sent_text}</div>'
-                    f'<div style="display:flex;align-items:center;gap:8px">'
-                    f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
-                    f'<div style="width:{bar_w}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
-                    f'</div>'
-                    f'<span style="font-family:monospace;font-size:11px;color:#666">{score:.4f}</span>'
-                    f'</div></div>',
-                    unsafe_allow_html=True
-                )
 
 
 # ── Render category result (persists independently) ───────────────────────────
