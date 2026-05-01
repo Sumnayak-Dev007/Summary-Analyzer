@@ -195,7 +195,6 @@ def textrank_summarize(
         lead_start = first_proper_sentence.find(title) + len(title)
         if lead_start > 0 and lead_start < len(first_proper_sentence):
             actual_lead = first_proper_sentence[lead_start:].strip()
-            # Remove leading punctuation
             actual_lead = actual_lead.lstrip('.!? ')
             if actual_lead and len(actual_lead) > 30:
                 first_proper_sentence = actual_lead
@@ -221,11 +220,18 @@ def textrank_summarize(
             s.text.strip() for s in doc.sents
             if len(s.text.strip()) >= min_sentence_len
         ][:n_sentences]
-        summary = " ".join(fallback)
+        
         if bullet_points:
-            sentences_list = [s.strip() for s in summary.split('. ') if s.strip()]
-            bullet_summary = "\n".join([f"• {s}." for s in sentences_list])
-            summary = bullet_summary
+            sentences_list = []
+            for sent in fallback:
+                sent = sent.strip()
+                if sent:
+                    if not sent.endswith(('.', '!', '?')):
+                        sent = sent + '.'
+                    sentences_list.append(f"• {sent}")
+            summary = "\n\n".join(sentences_list)
+        else:
+            summary = " ".join(fallback)
         
         return {
             "summary": summary,
@@ -252,7 +258,7 @@ def textrank_summarize(
     if len(first_proper_sentence) >= min_sentence_len:
         lead_candidates.append((first_proper_sentence, sent_scores.get(first_proper_sentence, 1.2)))
     
-    # Candidate 2: Sentence containing key terms (renewable, energy, India, security)
+    # Candidate 2: Sentence containing key terms
     key_terms = ["renewable", "energy", "india", "security", "climate", "finance"]
     for sent_text, score in top[:5]:
         if any(term in sent_text.lower() for term in key_terms):
@@ -271,7 +277,6 @@ def textrank_summarize(
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
-        # Skip if already selected
         if any(sent_text == s for s, _ in selected):
             continue
         if any(_overlap(sent_text, s) > diversity_threshold for s, _ in selected):
@@ -284,33 +289,29 @@ def textrank_summarize(
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
     )
 
-    # Build summary
+    # Build summary sentences
     summary_sentences = [s for s, _ in selected]
-    summary = " ".join(summary_sentences)
     
-    # Clean up the summary
-    summary = re.sub(r'\s+', ' ', summary)
-    summary = re.sub(r'\.\s+\.', '.', summary)
-    summary = re.sub(r'\s+\.', '.', summary)
+    # Clean each sentence
+    cleaned_sentences = []
+    for sent in summary_sentences:
+        sent = re.sub(r'\s+', ' ', sent)
+        if not sent.endswith(('.', '!', '?')):
+            sent = sent + '.'
+        sent = re.sub(r'\.\.+', '.', sent)
+        cleaned_sentences.append(sent)
     
-    # Ensure summary ends with proper punctuation
-    if summary and not summary[-1] in ('.', '!', '?'):
-        summary += '.'
+    # Format based on bullet_points preference
+    if bullet_points:
+        # Each sentence as a bullet point with double line breaks
+        bullet_list = [f"• {sent}" for sent in cleaned_sentences]
+        summary = "\n\n".join(bullet_list)
+    else:
+        summary = " ".join(cleaned_sentences)
     
     # Ensure first letter is capitalized
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
-    
-    # Convert to bullet points if requested
-    if bullet_points:
-        sentences_list = []
-        for sent in summary_sentences:
-            sent = sent.strip()
-            if sent:
-                if not sent.endswith(('.', '!', '?')):
-                    sent = sent + '.'
-                sentences_list.append(f"• {sent}")
-        summary = "\n".join(sentences_list)
 
     return {
         "summary": summary,
@@ -319,7 +320,6 @@ def textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
-
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
@@ -464,7 +464,8 @@ if "summary_result" in st.session_state:
         st.metric("RAM delta", f"{result['ram_mb']} MB")
     with c3: 
         if bullet_points:
-            st.metric("Bullet points", len(result["summary"].split('\n')))
+            st.markdown("### Summary (Bullet Points)")
+            st.markdown(result["summary"])
         else:
             st.metric("Sentences", len(result["sentences"]))
 
