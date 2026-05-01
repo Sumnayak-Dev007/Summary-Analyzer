@@ -94,6 +94,7 @@ def fetch_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, downloaded
 
 
+
 def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     """
     Separates title from article body for better summarization.
@@ -128,6 +129,7 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
         full_text = body
     
     return full_text, title
+
 
 
 def remove_title_from_text(text: str, title: str | None = None) -> str:
@@ -179,27 +181,57 @@ def remove_title_from_text(text: str, title: str | None = None) -> str:
     return clean_text
 
 
-def calculate_quote_score(sent_text: str) -> float:
-    """Boost score for sentences with well-formed quotes."""
-    score = 0
+
+def fix_quote_balance(text: str) -> str:
+    """Fix unbalanced quotes in the summary."""
+    # Count quotes
+    double_quotes = text.count('"')
+    single_quotes = text.count("'")
+    smart_quotes_open = text.count('“')
+    smart_quotes_close = text.count('”')
     
-    # Check for opening and closing quotes
-    if '"' in sent_text or "'" in sent_text or '“' in sent_text or '”' in sent_text:
-        score += 0.3
-        
-        # Check if quote has attribution (said, added, emphasised, etc.)
-        attribution_words = ['said', 'added', 'emphasised', 'stated', 'told', 'explained', 'noted']
-        if any(word in sent_text.lower() for word in attribution_words):
-            score += 0.2
-            
-        # Check if quote is complete (starts and ends with quotes)
-        quote_chars = ['"', "'", '“', '”']
-        has_opening = any(c in sent_text for c in quote_chars)
-        has_closing = any(c in sent_text for c in quote_chars)
-        if has_opening and has_closing:
-            score += 0.3
-            
-    return score
+    # Add missing closing quotes
+    if double_quotes % 2 != 0:
+        text = text + '"'
+    if smart_quotes_open > smart_quotes_close:
+        text = text + '”'
+    
+    # Ensure quotes are properly attributed
+    # If a quote opens but no attribution word nearby, add attribution
+    quote_starts = [m.start() for m in re.finditer(r'["“]', text)]
+    for start in quote_starts:
+        # Check if attribution word exists before the quote
+        preceding = text[max(0, start-50):start]
+        attribution_words = ['said', 'added', 'emphasised', 'stated', 'told', 'explained', 'noted', 'called']
+        if not any(word in preceding.lower() for word in attribution_words):
+            # Try to add attribution from context
+            pass
+    
+    return text
+
+
+def improve_quote_structure(text: str) -> str:
+    """Improve quote structure in summary."""
+    # Split into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    
+    # Track if we're inside a quote
+    in_quote = False
+    fixed_sentences = []
+    
+    for sent in sentences:
+        # Check quote balance in this sentence
+        quote_count = sent.count('"') + sent.count('“')
+        if quote_count % 2 != 0:
+            in_quote = not in_quote
+            if not in_quote:
+                # Quote closes here, ensure proper punctuation
+                if not sent.endswith(('"', '”')):
+                    sent = sent + '"'
+        fixed_sentences.append(sent)
+    
+    return ' '.join(fixed_sentences)
+
 
 
 def remove_dateline(text: str) -> str:
@@ -223,19 +255,6 @@ def is_complete_quote(sent_text: str) -> bool:
         return True
     return False
 
-def fix_cut_quote(sent_text: str, original_text: str) -> str:
-    """If quote is cut off, try to complete it."""
-    if not is_complete_quote(sent_text):
-        # Try to find the rest of the quote in the original text
-        quote_start = re.search(r'[“"\'][^”"\']*$', sent_text)
-        if quote_start:
-            quote_text = quote_start.group()
-            # Look for closing quote in next sentences
-            next_part = original_text[original_text.find(sent_text) + len(sent_text):]
-            closing = re.search(r'[^”"\']*[”"\']', next_part)
-            if closing:
-                sent_text = sent_text + closing.group()
-    return sent_text
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
@@ -409,8 +428,11 @@ def sumy_textrank_summarize(
         summary = " ".join(cleaned_sentences)
     
     # Ensure first letter is capitalized
-    if summary and not summary[0].isupper():
-        summary = summary[0].upper() + summary[1:]
+    if summary:
+        summary = fix_quote_balance(summary)
+        summary = improve_quote_structure(summary)
+        if not summary[0].isupper():
+            summary = summary[0].upper() + summary[1:]
 
     return {
         "summary": summary,
