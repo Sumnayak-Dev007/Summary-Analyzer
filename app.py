@@ -231,8 +231,8 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Summarization")
-    n_sentences   = st.slider("Summary sentences", 2, 15, 5)
-    min_sent_len  = st.slider("Min sentence length (chars)", 20, 100, 40)
+    n_sentences   = st.slider("Summary sentences", 2, 15, 7)
+    min_sent_len  = st.slider("Min sentence length (chars)", 20, 100, 32)
     focus_input   = st.text_input(
         "Focus phrases (comma separated)",
         placeholder="e.g. Narendra Modi, Budget 2025"
