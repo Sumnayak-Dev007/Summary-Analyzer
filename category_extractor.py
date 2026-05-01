@@ -101,7 +101,7 @@ TOPIC_CATEGORIES = {
 
 # ── Quality filter constants ──────────────────────────────────────────────────
 
-# Words that indicate junk/non-entities
+# Generic junk words (but not for valid entities)
 JUNK_WORDS = {
     "news", "look", "first", "things", "it", "this", "there", "after", 
     "said", "says", "latest", "update", "updates", "new", "old", "big", 
@@ -128,20 +128,20 @@ SPEC_PATTERNS = [
     r'^bluetooth\s*\d+$',
 ]
 
-# Valid organization names that should never be filtered
+# Valid organization names (including short ones like UK, US)
 VALID_ORGANIZATIONS = {
     "IPL", "BCCI", "ICC", "FIFA", "UEFA", "NBA", "NFL", "MLB", "NHL",
     "NASA", "ISRO", "WHO", "UN", "NATO", "EU", "CWG", "AIIMS", "IIT",
-    "IIM", "US", "UK", "UAE", "AI", "SAI"
+    "IIM", "US", "UK", "UAE", "AI", "SAI", "HT", "BBC", "CNN", "NYT"
 }
 
-# Valid place names that should never be filtered
+# Valid place names (including short ones)
 VALID_PLACES = {
     "Mumbai", "Delhi", "Bangalore", "Chennai", "Kolkata", "Hyderabad",
     "Pune", "Ahmedabad", "Jaipur", "Lucknow", "Kanpur", "Nagpur",
     "Indore", "Thane", "Bhopal", "Visakhapatnam", "Patna", "Vadodara",
     "Ludhiana", "Agra", "Nashik", "Ranchi", "Gurgaon", "Noida",
-    "Afghanistan", "Australia", "England", "Brazil"
+    "Afghanistan", "Australia", "England", "Brazil", "US", "UK", "India"
 }
 
 
@@ -181,8 +181,15 @@ def is_product_spec(text: str) -> bool:
     return False
 
 
-def is_too_generic(text: str) -> bool:
-    """Check if entity name is too generic"""
+def is_too_generic(text: str, entity_type: str) -> bool:
+    """
+    Check if entity name is too generic.
+    But respect entity type - valid places/organizations should NOT be filtered
+    """
+    # NEVER filter based on length if it's a recognized entity type
+    if entity_type in ["place", "organization", "person"]:
+        return False
+    
     text_lower = text.lower()
     
     if text_lower in JUNK_WORDS:
@@ -199,7 +206,8 @@ def is_valid_person_name(name: str) -> bool:
     if is_product_spec(name):
         return False
     
-    if name in ["Advani", "Pankaj", "Kothari", "Khalida Popal", "Popal"]:
+    # Common short names that are valid
+    if name in ["Advani", "Pankaj", "Kothari", "Khalida Popal", "Popal", "Stiell"]:
         return True
     
     if re.search(r'\d', name):
@@ -228,7 +236,8 @@ def is_valid_organization(name: str) -> bool:
     
     words = name.split()
     
-    if name.isupper() and 2 <= len(name) <= 5:
+    # Acronyms (all caps, 2-6 letters) are valid organizations
+    if name.isupper() and 2 <= len(name) <= 6:
         return True
     
     if len(words) == 1:
@@ -249,6 +258,10 @@ def is_valid_place(name: str) -> bool:
     
     if not name[0].isupper():
         return False
+    
+    # Allow 2-letter country codes (US, UK, etc.)
+    if len(name) == 2 and name.isupper():
+        return True
     
     if len(name) < 3:
         return False
@@ -362,42 +375,41 @@ def extract_entities_with_spacy(cleaned_text: str, nlp) -> tuple[list[Category],
     for cat in raw_categories:
         filter_reason = None
         
+        # Check product specs first
         if is_product_spec(cat.name):
             filter_reason = "product_specification"
-        elif is_too_generic(cat.name):
-            filter_reason = "too_generic"
-        elif cat.entity_type == "person":
-            if not is_valid_person_name(cat.name):
-                filter_reason = "invalid_person_name"
-            else:
-                clean_categories.append(cat)
-                continue
-        elif cat.entity_type == "organization":
-            if not is_valid_organization(cat.name):
-                filter_reason = "invalid_organization"
-            else:
-                clean_categories.append(cat)
-                continue
-        elif cat.entity_type == "place":
-            if not is_valid_place(cat.name):
-                filter_reason = "invalid_place"
-            else:
-                clean_categories.append(cat)
-                continue
-        elif cat.entity_type == "event":
-            # Keep events as valid categories
-            clean_categories.append(cat)
-            continue
         else:
-            # For other types, keep them but with empty entity_type
-            cat.entity_type = ""
-            clean_categories.append(cat)
-            continue
+            # Validate based on entity type (with proper generic check that respects entity type)
+            if cat.entity_type == "person":
+                if not is_valid_person_name(cat.name):
+                    filter_reason = "invalid_person_name"
+            elif cat.entity_type == "organization":
+                if not is_valid_organization(cat.name):
+                    filter_reason = "invalid_organization"
+            elif cat.entity_type == "place":
+                if not is_valid_place(cat.name):
+                    filter_reason = "invalid_place"
+            elif cat.entity_type == "product":
+                # Products are optional, keep them
+                pass
+            elif cat.entity_type == "event":
+                # Events are valid categories
+                pass
+            else:
+                # For other types, keep them with empty entity_type
+                cat.entity_type = ""
+            
+            # Check generic only if not already filtered and not a valid entity type
+            if not filter_reason and cat.entity_type not in ["person", "organization", "place"]:
+                if is_too_generic(cat.name, cat.entity_type):
+                    filter_reason = "too_generic"
         
         if filter_reason:
             cat.is_clean = False
             cat.filter_reason = filter_reason
             discarded_categories.append(cat)
+        else:
+            clean_categories.append(cat)
     
     return raw_categories, clean_categories, discarded_categories
 
@@ -514,8 +526,8 @@ def render_table(categories: list[Category], title: str, show_filter_reason: boo
     
     st.markdown(
         f'<table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden;border:1px solid var(--streamlit-border-color)">'
-        f'<thead><tr style="background:var(--streamlit-secondary-bg-color)">{header_html} </tr></thead>'
-        f'<tbody>{rows}</tbody><table>',
+        f'<thead><tr style="background:var(--streamlit-secondary-bg-color)">{header_html} <tr></thead>'
+        f'<tbody>{rows}</tbody></table>',
         unsafe_allow_html=True,
     )
 
