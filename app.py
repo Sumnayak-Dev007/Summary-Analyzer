@@ -314,7 +314,6 @@ if btn_summarize:
                 st.session_state["summary_text"] = cleaned
 
 
-# ── Render summary result (persists independently) ────────────────────────────
 
 if "summary_result" in st.session_state:
     result = st.session_state["summary_result"]
@@ -324,39 +323,38 @@ if "summary_result" in st.session_state:
 
     st.header("TextRank Method Comparison")
     
-    # Display side by side
-    col1, col2 = st.columns(2)
+    # Display Sumy TextRank (first)
+    st.markdown("### Sumy TextRank")
+    st.markdown("*Keyword-based TextRank*")
     
-    with col1:
-        st.markdown("### Sumy TextRank")
-        st.markdown("*Keyword-based TextRank*")
-        
-        if sumy_metrics:
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric("Time", f"{sumy_metrics.get('elapsed', 0)}s")
-            with m2:
-                st.metric("RAM", f"{sumy_metrics.get('ram', 0)} MB")
-            with m3:
-                st.metric("Words", sumy_metrics.get('words', 0))
-        
-        st.markdown("**Summary:**")
-        st.markdown(sumy_summary if sumy_summary else "No summary generated")
-    
-    with col2:
-        st.markdown("### spaCy PyTextRank")
-        st.markdown("*Phrase-based TextRank*")
-        
+    if sumy_metrics:
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.metric("Time", f"{result['elapsed_s']}s")
+            st.metric("Time", f"{sumy_metrics.get('elapsed', 0)}s")
         with m2:
-            st.metric("RAM delta", f"{result['ram_mb']} MB")
+            st.metric("RAM", f"{sumy_metrics.get('ram', 0)} MB")
         with m3:
-            st.metric("Sentences", len(result["sentences"]))
-        
-        st.markdown("**Summary:**")
-        st.markdown(result["summary"])
+            st.metric("Words", sumy_metrics.get('words', 0))
+    
+    st.markdown("**Summary:**")
+    st.markdown(sumy_summary if sumy_summary else "No summary generated")
+    
+    st.divider()
+    
+    # Display spaCy PyTextRank (second)
+    st.markdown("### spaCy PyTextRank")
+    st.markdown("*Phrase-based TextRank*")
+    
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Time", f"{result['elapsed_s']}s")
+    with m2:
+        st.metric("RAM delta", f"{result['ram_mb']} MB")
+    with m3:
+        st.metric("Sentences", len(result["sentences"]))
+    
+    st.markdown("**Summary:**")
+    st.markdown(result["summary"])
     
     st.divider()
     
@@ -396,7 +394,6 @@ if "summary_result" in st.session_state:
         - Good for: Articles with many named entities (people, places, organizations)
         - Better captures quotes and important names
         """)
-
 
 # ── Category extraction task ──────────────────────────────────────────────────
 
