@@ -163,23 +163,22 @@ def sumy_textrank_summarize(
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
 
-    # Parse text with Sumy
-    parser = PlaintextParser.from_string(text, Tokenizer("english"))
+    # Remove title from the text if present (for summarization only)
+    clean_text_for_summary = text
+    if title and title in text:
+        # Remove the title from the beginning
+        clean_text_for_summary = text.replace(f"{title}. ", "", 1)
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title} ", "", 1)
+    
+    # Parse text with Sumy (without title)
+    parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
     summarizer = TextRankSummarizer()
     
     # Get all sentences in original order
     all_sentences = [str(sent).strip() for sent in parser.document.sentences]
     
-    # Find the proper lead sentence
+    # Find the proper lead sentence (first sentence after title removal)
     first_proper_sentence = all_sentences[0] if all_sentences else ""
-    
-    if title and title in first_proper_sentence:
-        lead_start = first_proper_sentence.find(title) + len(title)
-        if lead_start > 0 and lead_start < len(first_proper_sentence):
-            actual_lead = first_proper_sentence[lead_start:].strip()
-            actual_lead = actual_lead.lstrip('.!? ')
-            if actual_lead and len(actual_lead) > 30:
-                first_proper_sentence = actual_lead
 
     # Get summary sentences from Sumy
     summary_sentences = summarizer(parser.document, n_sentences * 2)  # Get extra for ranking
@@ -290,7 +289,6 @@ def sumy_textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
-
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
