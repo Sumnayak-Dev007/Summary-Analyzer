@@ -263,9 +263,8 @@ def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
     return top_entities[:7]
 
 
-def textrank_summarize(
+def sumy_textrank_summarize(
     text: str,
-    nlp,
     n_sentences: int = 6,
     min_sentence_len: int = 32,
     focus_phrases: list[str] | None = None,
@@ -273,9 +272,8 @@ def textrank_summarize(
     diversity_threshold: float = 0.6,
     bullet_points: bool = False,
     title: str | None = None,
-    prefer_quotes: bool = True,  # NEW: Toggle for quote preference
 ) -> dict:
-    """spaCy + PyTextRank summarization with quote-aware scoring."""
+    """Sumy TextRank summarization with title removal and quote handling."""
     proc = psutil.Process(os.getpid())
     ram0 = proc.memory_info().rss / 1024 / 1024
     t0 = time.monotonic()
@@ -283,50 +281,42 @@ def textrank_summarize(
     # Remove datelines first
     clean_text = text
     dateline_patterns = [
-        r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?:\s*',  # "New Delhi:" or "Washington:"
-        r'^[A-Z][a-z]+, [A-Z][a-z]+:\s*',         # "London, UK:"
-        r'\b[A-Z][a-z]+:\s+(?=[A-Z])',            # Any "City:" before capital letter
+        r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?:\s*',
+        r'^[A-Z][a-z]+, [A-Z][a-z]+:\s*',
+        r'\b[A-Z][a-z]+:\s+(?=[A-Z])',
     ]
     for pattern in dateline_patterns:
         clean_text = re.sub(pattern, '', clean_text)
     
+    # Aggressively remove title
     clean_text_for_summary = remove_title_from_text(clean_text, title)
     
-    doc = nlp(clean_text_for_summary[:100_000])
-    all_sentences = [sent.text.strip() for sent in doc.sents]
+    # Remove any lingering datelines
+    clean_text_for_summary = remove_dateline(clean_text_for_summary)
     
+    # If the first sentence still looks like a title, remove it
+    first_sent = clean_text_for_summary.split('. ')[0] if '. ' in clean_text_for_summary else clean_text_for_summary[:100]
+    if len(first_sent) < 80 and not first_sent.endswith(('.', '!', '?')):
+        parts = clean_text_for_summary.split('. ', 1)
+        if len(parts) > 1:
+            clean_text_for_summary = parts[1]
+    
+    parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
+    summarizer = TextRankSummarizer()
+    
+    all_sentences = [str(sent).strip() for sent in parser.document.sentences]
     first_proper_sentence = all_sentences[0] if all_sentences else ""
 
+    # Get summary sentences (get more for ranking)
+    summary_sentences = summarizer(parser.document, n_sentences * 2)
+    
+    # Build sentence scores
     sent_scores: dict[str, float] = {}
+    for sent in summary_sentences:
+        sent_text = str(sent).strip()
+        if len(sent_text) >= min_sentence_len:
+            sent_scores[sent_text] = sent_scores.get(sent_text, 0) + 1
     
-    # Original TextRank scores
-    for phrase in doc._.phrases:
-        for sent in doc.sents:
-            if phrase.text.lower() in sent.text.lower():
-                key = sent.text.strip()
-                sent_scores[key] = sent_scores.get(key, 0) + phrase.rank
-    
-    # QUOTE-AWARE BOOSTING
-    if prefer_quotes:
-        for key in sent_scores:
-            # Boost for quotes
-            if '"' in key or "'" in key or '“' in key or '”' in key:
-                sent_scores[key] *= 1.3  # 30% boost for quotes
-                
-                # Extra boost for quotes with attribution
-                attribution = ['said', 'added', 'emphasised', 'stated', 'told', 'explained', 'noted']
-                if any(word in key.lower() for word in attribution):
-                    sent_scores[key] *= 1.2
-                
-                # Extra boost for complete quotes (even quote count)
-                quote_count = key.count('"') + key.count("'") + key.count('“') + key.count('”')
-                if quote_count > 0 and quote_count % 2 == 0:
-                    sent_scores[key] *= 1.15
-            
-            # Penalize sentences with dateline remnants
-            if re.search(r'\b[A-Z][a-z]+:\s*$', key):
-                sent_scores[key] *= 0.5
-
     # Apply focus phrase boosting
     if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
@@ -334,13 +324,8 @@ def textrank_summarize(
                 if fp.lower() in key.lower():
                     sent_scores[key] *= phrase_boost
 
-    sent_scores = {s: sc for s, sc in sent_scores.items() if len(s) >= min_sentence_len}
-
     if not sent_scores:
-        fallback = [
-            s.text.strip() for s in doc.sents
-            if len(s.text.strip()) >= min_sentence_len
-        ][:n_sentences]
+        fallback = [s for s in all_sentences if len(s) >= min_sentence_len][:n_sentences]
         
         if bullet_points:
             sentences_list = []
@@ -362,6 +347,7 @@ def textrank_summarize(
             "method": "fallback",
         }
 
+    # Sort by score and select top sentences
     top = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
 
     def _overlap(a: str, b: str) -> float:
@@ -378,12 +364,6 @@ def textrank_summarize(
     if len(first_proper_sentence) >= min_sentence_len:
         lead_candidates.append((first_proper_sentence, sent_scores.get(first_proper_sentence, 1.2)))
     
-    # Prefer quote-heavy lead for quote-focused articles
-    if prefer_quotes:
-        quote_sentences = [(s, sc) for s, sc in top if '"' in s or "'" in s or '“' in s]
-        if quote_sentences:
-            lead_candidates.extend(quote_sentences[:2])
-    
     if top:
         lead_candidates.append(top[0])
     
@@ -391,7 +371,7 @@ def textrank_summarize(
         best_lead = max(lead_candidates, key=lambda x: x[1])
         selected.append(best_lead)
     
-    # Add other important sentences, prioritizing quotes
+    # Add other important sentences
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
@@ -407,20 +387,9 @@ def textrank_summarize(
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
     )
 
-    # Post-process selected sentences to fix any cut quotes
-    summary_sentences_final = []
-    for sent, _ in selected:
-        # Fix cut quotes by looking ahead
-        if not is_complete_quote(sent):
-            # Try to complete the quote from subsequent text
-            current_idx = all_sentences.index(sent) if sent in all_sentences else -1
-            if current_idx != -1 and current_idx + 1 < len(all_sentences):
-                next_sent = all_sentences[current_idx + 1]
-                combined = sent + " " + next_sent
-                if is_complete_quote(combined):
-                    sent = combined
-        summary_sentences_final.append(sent)
+    summary_sentences_final = [s for s, _ in selected]
     
+    # Clean each sentence
     cleaned_sentences = []
     for sent in summary_sentences_final:
         sent = re.sub(r'\s+', ' ', sent)
@@ -432,12 +401,14 @@ def textrank_summarize(
         sent = re.sub(r'\.\.+', '.', sent)
         cleaned_sentences.append(sent)
     
+    # Format based on bullet_points preference
     if bullet_points:
         bullet_list = [f"• {sent}" for sent in cleaned_sentences]
         summary = "\n\n".join(bullet_list)
     else:
         summary = " ".join(cleaned_sentences)
     
+    # Ensure first letter is capitalized
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
 
@@ -448,15 +419,6 @@ def textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
-
-
-def is_complete_quote(text: str) -> bool:
-    """Check if quotes in text are balanced (complete)."""
-    quote_chars = ['"', "'", '“', '”']
-    total = 0
-    for q in quote_chars:
-        total += text.count(q)
-    return total % 2 == 0
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
