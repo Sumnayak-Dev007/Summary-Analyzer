@@ -99,21 +99,28 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     Separates title from article body for better summarization.
     Returns (full_text_for_context, title_for_display)
     """
-    lines = text.split('. ')
+    lines = text.split('\n')
     
     title = None
     body = text
     
-    first_part = lines[0].strip() if lines else ""
+    # Method 1: Check if first line is short and likely a title
+    if lines and len(lines[0].strip()) < 100 and not lines[0].strip().endswith(('.', '!', '?')):
+        title = lines[0].strip()
+        body = ' '.join(lines[1:]) if len(lines) > 1 else text
     
+    # Method 2: Look for quoted title
+    first_part = text.split('. ')[0] if '. ' in text else text[:100]
     if first_part and (first_part.startswith("'") or first_part.startswith('"') or first_part.startswith('‘')):
         title = first_part.strip("'\"‘’")
         body = text[len(first_part):].strip()
         if body.startswith(('.', '!', '?')):
             body = body[1:].strip()
+    
+    # Method 3: Look for short first sentence (less than 80 chars without ending punctuation)
     elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
         title = first_part
-        body = '. '.join(lines[1:]) if len(lines) > 1 else text
+        body = '. '.join(text.split('. ')[1:]) if '. ' in text else text
     
     if title:
         full_text = f"{title}. {body}"
@@ -165,9 +172,43 @@ def sumy_textrank_summarize(
 
     # Remove title from the text if present (for summarization only)
     clean_text_for_summary = text
-    if title and title in text:
-        clean_text_for_summary = text.replace(f"{title}. ", "", 1)
-        clean_text_for_summary = clean_text_for_summary.replace(f"{title} ", "", 1)
+    
+    if title:
+        # Try multiple patterns to remove the title
+        title_clean = title.strip()
+        
+        # Pattern 1: Title followed by period and space
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}. ", "", 1)
+        
+        # Pattern 2: Title followed by space (no period)
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean} ", "", 1)
+        
+        # Pattern 3: Title with newline
+        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}\n", "", 1)
+        
+        # Pattern 4: Title at beginning with line break
+        lines = clean_text_for_summary.split('\n')
+        if lines and lines[0].strip() == title_clean:
+            lines = lines[1:]
+            clean_text_for_summary = '\n'.join(lines)
+        
+        # Pattern 5: Remove quoted titles (like 'Title here' followed by space)
+        if title_clean.startswith("'") or title_clean.startswith('"') or title_clean.startswith('‘'):
+            quoted_title = title_clean.strip("'\"‘’")
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title}. ", "", 1)
+            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title} ", "", 1)
+    
+    # Also remove common title patterns (short first line that doesn't end with period)
+    first_line = clean_text_for_summary.split('\n')[0] if '\n' in clean_text_for_summary else clean_text_for_summary[:100]
+    if len(first_line) < 80 and not first_line.endswith(('.', '!', '?')):
+        # Remove the first line as it's likely a title
+        if '\n' in clean_text_for_summary:
+            clean_text_for_summary = '\n'.join(clean_text_for_summary.split('\n')[1:])
+        else:
+            # Find first period to skip the title
+            period_pos = clean_text_for_summary.find('. ')
+            if period_pos > 0 and period_pos < 100:
+                clean_text_for_summary = clean_text_for_summary[period_pos + 2:]
     
     parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
     summarizer = TextRankSummarizer()
