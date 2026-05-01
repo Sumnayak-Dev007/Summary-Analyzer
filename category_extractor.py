@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-category_extractor.py
-─────────────────────
-Category extraction using spaCy NER + Topic Keyword Matching.
-Shows raw extracted categories, cleaned categories (including topic categories), and discarded categories.
-"""
-
 import os
 import re
 import time
