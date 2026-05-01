@@ -446,7 +446,6 @@ if btn_summarize:
                 st.session_state["focus_phrases_used"] = focus_phrases_selected
 
 
-# ── Render summary result (persists independently) ────────────────────────────
 
 if "summary_result" in st.session_state:
     result = st.session_state["summary_result"]
@@ -464,8 +463,7 @@ if "summary_result" in st.session_state:
         st.metric("RAM delta", f"{result['ram_mb']} MB")
     with c3: 
         if bullet_points:
-            st.markdown("### Summary (Bullet Points)")
-            st.markdown(result["summary"])
+            st.metric("Bullet points", len(result["summary"].split('\n')))
         else:
             st.metric("Sentences", len(result["sentences"]))
 
@@ -473,7 +471,7 @@ if "summary_result" in st.session_state:
     if focus_phrases_used:
         st.info(f"🎯 **Focusing on:** {', '.join(focus_phrases_used)}")
 
-    # Display summary
+    # Display summary (ONLY ONCE)
     if bullet_points:
         st.markdown("### Summary (Bullet Points)")
         st.markdown(result["summary"])
