@@ -126,7 +126,7 @@ def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
 def textrank_summarize(
     text: str,
     nlp,
-    n_sentences: int = 7,
+    n_sentences: int = 5,
     min_sentence_len: int = 32,
     focus_phrases: list[str] | None = None,
     phrase_boost: float = 1.5,
@@ -266,7 +266,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Summarization Settings")
     
-    n_sentences = st.slider("Number of sentences", 2, 15, 7,
+    n_sentences = st.slider("Number of sentences", 2, 15, 5,
                             help="More sentences = more detailed summary")
     
     # Remove min_sentence_len slider when bullet points is checked
