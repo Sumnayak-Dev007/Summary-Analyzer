@@ -95,10 +95,6 @@ def fetch_article(url: str) -> tuple[str | None, str | None]:
 
 
 def smart_article_cleaning(text: str) -> tuple[str, str | None]:
-    """
-    Separates title from article body for better summarization.
-    Returns (full_text_for_context, title_for_display)
-    """
     lines = text.split('. ')
     
     title = None
@@ -114,13 +110,9 @@ def smart_article_cleaning(text: str) -> tuple[str, str | None]:
     elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
         title = first_part
         body = '. '.join(lines[1:]) if len(lines) > 1 else text
+
+    return body, title
     
-    if title:
-        full_text = f"{title}. {body}"
-    else:
-        full_text = body
-    
-    return full_text, title
 
 
 def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
@@ -396,9 +388,18 @@ if btn_summarize and url:
             spacy_nlp = load_spacy_for_ner()
             
             if spacy_nlp:
-                auto_phrases = auto_detect_focus_phrases(full_text, spacy_nlp)
+                # Extract body separately - DON'T use full_text with title
+                body_text = cleaned  # Start with original cleaned text
                 
-                st.session_state.full_text = full_text
+                # Remove title from body if detected
+                if article_title:
+                    body_text = body_text.replace(article_title, '', 1)
+                    body_text = body_text.replace(f"{article_title}. ", '', 1)
+                    body_text = body_text.replace(f"{article_title} ", '', 1)
+                
+                auto_phrases = auto_detect_focus_phrases(body_text, spacy_nlp)
+                
+                st.session_state.full_text = body_text  # Use body_text WITHOUT title
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
                 st.session_state.spacy_model = spacy_nlp
@@ -406,10 +407,9 @@ if btn_summarize and url:
                 st.session_state.apply_focus = False
                 st.session_state.initial_summary_generated = False
                 
-                # Generate initial summary immediately
                 with st.spinner("Generating initial summary..."):
                     initial_result = sumy_textrank_summarize(
-                        full_text,
+                        body_text,  # Use body_text WITHOUT title
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
                         focus_phrases=None,
@@ -420,13 +420,11 @@ if btn_summarize and url:
                     )
                 
                 st.session_state["summary_result"] = initial_result
-                st.session_state["summary_text"] = full_text
+                st.session_state["summary_text"] = body_text
                 st.session_state["focus_phrases_used"] = []
                 st.session_state.initial_summary_generated = True
                 
                 st.rerun()
-        else:
-            st.error("Could not extract content from this URL.")
 
 # Display focus phrase selection UI (only after article is loaded)
 if st.session_state.article_loaded and st.session_state.full_text:
