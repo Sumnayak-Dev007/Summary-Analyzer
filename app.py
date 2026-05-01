@@ -166,31 +166,23 @@ def sumy_textrank_summarize(
     # Remove title from the text if present (for summarization only)
     clean_text_for_summary = text
     if title and title in text:
-        # Remove the title from the beginning
         clean_text_for_summary = text.replace(f"{title}. ", "", 1)
         clean_text_for_summary = clean_text_for_summary.replace(f"{title} ", "", 1)
     
-    # Parse text with Sumy (without title)
     parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
     summarizer = TextRankSummarizer()
     
-    # Get all sentences in original order
     all_sentences = [str(sent).strip() for sent in parser.document.sentences]
-    
-    # Find the proper lead sentence (first sentence after title removal)
     first_proper_sentence = all_sentences[0] if all_sentences else ""
 
-    # Get summary sentences from Sumy
-    summary_sentences = summarizer(parser.document, n_sentences * 2)  # Get extra for ranking
+    summary_sentences = summarizer(parser.document, n_sentences * 2)
     
-    # Build sentence scores
     sent_scores: dict[str, float] = {}
     for sent in summary_sentences:
         sent_text = str(sent).strip()
         if len(sent_text) >= min_sentence_len:
             sent_scores[sent_text] = sent_scores.get(sent_text, 0) + 1
     
-    # Apply focus phrase boosting
     if focus_phrases and len(focus_phrases) > 0:
         for key in sent_scores:
             for fp in focus_phrases:
@@ -220,7 +212,6 @@ def sumy_textrank_summarize(
             "method": "fallback",
         }
 
-    # Sort by score and select top sentences
     top = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
 
     def _overlap(a: str, b: str) -> float:
@@ -231,7 +222,6 @@ def sumy_textrank_summarize(
 
     selected: list[tuple[str, float]] = []
     
-    # Intelligent lead sentence selection
     lead_candidates = []
     
     if len(first_proper_sentence) >= min_sentence_len:
@@ -244,7 +234,6 @@ def sumy_textrank_summarize(
         best_lead = max(lead_candidates, key=lambda x: x[1])
         selected.append(best_lead)
     
-    # Add other important sentences
     for sent_text, score in top:
         if len(selected) >= n_sentences:
             break
@@ -254,7 +243,6 @@ def sumy_textrank_summarize(
             continue
         selected.append((sent_text, score))
 
-    # Reorder to original article sequence
     selected = sorted(
         selected,
         key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
@@ -262,7 +250,6 @@ def sumy_textrank_summarize(
 
     summary_sentences_final = [s for s, _ in selected]
     
-    # Clean each sentence
     cleaned_sentences = []
     for sent in summary_sentences_final:
         sent = re.sub(r'\s+', ' ', sent)
@@ -271,14 +258,12 @@ def sumy_textrank_summarize(
         sent = re.sub(r'\.\.+', '.', sent)
         cleaned_sentences.append(sent)
     
-    # Format based on bullet_points preference
     if bullet_points:
         bullet_list = [f"• {sent}" for sent in cleaned_sentences]
         summary = "\n\n".join(bullet_list)
     else:
         summary = " ".join(cleaned_sentences)
     
-    # Ensure first letter is capitalized
     if summary and not summary[0].isupper():
         summary = summary[0].upper() + summary[1:]
 
@@ -289,6 +274,7 @@ def sumy_textrank_summarize(
         "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
         "method": "textrank",
     }
+
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
@@ -363,9 +349,11 @@ if "phrase_boost" not in st.session_state:
     st.session_state.phrase_boost = 1.5
 if "apply_focus" not in st.session_state:
     st.session_state.apply_focus = False
+if "initial_summary_generated" not in st.session_state:
+    st.session_state.initial_summary_generated = False
 
 
-# Load article when button is clicked
+# Load article and generate initial summary when button is clicked
 if btn_summarize and url:
     with st.spinner("Fetching and analyzing article..."):
         cleaned, _ = get_article(url)
@@ -382,11 +370,31 @@ if btn_summarize and url:
                 st.session_state.spacy_model = spacy_nlp
                 st.session_state.article_loaded = True
                 st.session_state.apply_focus = False
+                st.session_state.initial_summary_generated = False
+                
+                # Generate initial summary immediately
+                with st.spinner("Generating initial summary..."):
+                    initial_result = sumy_textrank_summarize(
+                        full_text,
+                        n_sentences=n_sentences,
+                        min_sentence_len=min_sent_len,
+                        focus_phrases=None,
+                        phrase_boost=1.5,
+                        diversity_threshold=0.6,
+                        bullet_points=bullet_points,
+                        title=article_title,
+                    )
+                
+                st.session_state["summary_result"] = initial_result
+                st.session_state["summary_text"] = full_text
+                st.session_state["focus_phrases_used"] = []
+                st.session_state.initial_summary_generated = True
+                
                 st.rerun()
         else:
             st.error("Could not extract content from this URL.")
 
-# Display focus phrase selection UI (outside button condition)
+# Display focus phrase selection UI (only after article is loaded)
 if st.session_state.article_loaded and st.session_state.full_text:
     
     if st.session_state.article_title:
@@ -416,41 +424,35 @@ if st.session_state.article_loaded and st.session_state.full_text:
         
         col1, col2 = st.columns([1, 4])
         with col1:
-            apply_btn = st.button("Apply Focus Phrases", key="apply_focus_btn")
+            apply_btn = st.button("Apply Focus Phrases & Regenerate", key="apply_focus_btn")
         
         if apply_btn:
             st.session_state.focus_phrases_selected = selected
             st.session_state.phrase_boost = boost
             st.session_state.apply_focus = True
-        
-        generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
-    else:
-        generate_btn = st.button("Generate Summary", type="primary", key="generate_summary_btn")
-    
-    # Generate summary when button is clicked
-    if generate_btn:
-        if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
-            focus_to_use = st.session_state.focus_phrases_selected
-            boost_to_use = st.session_state.phrase_boost
-        else:
-            focus_to_use = None
-            boost_to_use = 1.5
-        
-        with st.spinner("Generating summary with Sumy TextRank..."):
-            result = sumy_textrank_summarize(
-                st.session_state.full_text,
-                n_sentences=n_sentences,
-                min_sentence_len=min_sent_len,
-                focus_phrases=focus_to_use,
-                phrase_boost=boost_to_use,
-                diversity_threshold=0.6,
-                bullet_points=bullet_points,
-                title=st.session_state.article_title,
-            )
-        
-        st.session_state["summary_result"] = result
-        st.session_state["summary_text"] = st.session_state.full_text
-        st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
+            
+            with st.spinner("Regenerating summary with focus phrases..."):
+                if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
+                    focus_to_use = st.session_state.focus_phrases_selected
+                    boost_to_use = st.session_state.phrase_boost
+                else:
+                    focus_to_use = None
+                    boost_to_use = 1.5
+                
+                new_result = sumy_textrank_summarize(
+                    st.session_state.full_text,
+                    n_sentences=n_sentences,
+                    min_sentence_len=min_sent_len,
+                    focus_phrases=focus_to_use,
+                    phrase_boost=boost_to_use,
+                    diversity_threshold=0.6,
+                    bullet_points=bullet_points,
+                    title=st.session_state.article_title,
+                )
+            
+            st.session_state["summary_result"] = new_result
+            st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
+            st.rerun()
 
 
 # ── Render summary result ─────────────────────────────────────────────────────
