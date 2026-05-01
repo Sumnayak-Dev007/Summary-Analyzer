@@ -521,14 +521,13 @@ if btn_summarize and url:
     with st.spinner("Fetching and analyzing article..."):
         cleaned, _ = get_article(url)
         if cleaned:
-            full_text, article_title = smart_article_cleaning(cleaned)
+            body_text, article_title = smart_article_cleaning(cleaned)
             spacy_nlp = load_spacy_for_ner()
             
             if spacy_nlp:
-                auto_phrases = auto_detect_focus_phrases(full_text, spacy_nlp)
-                body_text, article_title = smart_article_cleaning(cleaned)
+                auto_phrases = auto_detect_focus_phrases(body_text, spacy_nlp)
                 
-                st.session_state.full_text = body_text
+                st.session_state.full_text = body_text  # Body without title
                 st.session_state.article_title = article_title
                 st.session_state.auto_focus_phrases = auto_phrases
                 st.session_state.spacy_model = spacy_nlp
@@ -536,10 +535,10 @@ if btn_summarize and url:
                 st.session_state.apply_focus = False
                 st.session_state.initial_summary_generated = False
                 
-                # Generate initial summary immediately
+                # Generate initial summary using body_text (without title)
                 with st.spinner("Generating initial summary..."):
                     initial_result = sumy_textrank_summarize(
-                        full_text,
+                        body_text,  # ← USE body_text, NOT full_text
                         n_sentences=n_sentences,
                         min_sentence_len=min_sent_len,
                         focus_phrases=None,
@@ -550,7 +549,7 @@ if btn_summarize and url:
                     )
                 
                 st.session_state["summary_result"] = initial_result
-                st.session_state["summary_text"] = full_text
+                st.session_state["summary_text"] = body_text
                 st.session_state["focus_phrases_used"] = []
                 st.session_state.initial_summary_generated = True
                 
