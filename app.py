@@ -1,34 +1,55 @@
 import re
 import os
 import time
+import math
+import logging
+from collections import Counter
+from pathlib import Path
+
 import nltk
 import psutil
 import streamlit as st
 import trafilatura
-import spacy
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.text_rank import TextRankSummarizer
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
-    page_title="Article Analyzer",
-    layout="wide"
+    page_title="Article Summarizer",
+    layout="wide",
 )
 
-nltk_data_path = os.path.join(os.path.expanduser("~"), "nltk_data")
-if nltk_data_path not in nltk.data.path:
-    nltk.data.path.append(nltk_data_path)
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
-for resource, path in [
-    ("punkt",                         "tokenizers/punkt"),
-    ("punkt_tab",                     "tokenizers/punkt_tab"),
-    ("averaged_perceptron_tagger",    "taggers/averaged_perceptron_tagger"),
-    ("averaged_perceptron_tagger_eng","taggers/averaged_perceptron_tagger_eng"),
-]:
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_LOCAL_MODELS = BASE_DIR / "local-models"
+DEFAULT_NLTK_DATA = BASE_DIR / ".nltk_data"
+
+
+# ── NLTK setup ────────────────────────────────────────────────────────────────
+
+_NLTK_DATA_DIR = os.environ.get("NLTK_DATA", str(DEFAULT_NLTK_DATA))
+os.makedirs(_NLTK_DATA_DIR, exist_ok=True)
+if _NLTK_DATA_DIR not in nltk.data.path:
+    nltk.data.path.insert(0, _NLTK_DATA_DIR)
+
+
+def _ensure_punkt():
+    for resource in ("tokenizers/punkt_tab/english", "tokenizers/punkt/english.pickle"):
+        try:
+            nltk.data.find(resource)
+            return
+        except LookupError:
+            continue
     try:
-        nltk.data.find(path)
-    except (LookupError, OSError):
-        nltk.download(resource, download_dir=nltk_data_path)
+        nltk.download("punkt_tab", download_dir=_NLTK_DATA_DIR, quiet=True)
+    except Exception:
+        nltk.download("punkt", download_dir=_NLTK_DATA_DIR, quiet=True)
+
+
+_ensure_punkt()
+
+
+# ── Article fetching / cleaning ───────────────────────────────────────────────
 
 NOISE_PATTERNS = re.compile(
     r"(click here|follow us|subscribe|telegram|whatsapp|"
@@ -44,31 +65,16 @@ NOISE_PATTERNS = re.compile(
     r"senior copy editor|copy editor|contributing writer|"
     r"for any tips and queries|reach out to|master's degree|"
     r"@abpnetwork|@gmail|@yahoo)",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
-
-# ── Model loading ─────────────────────────────────────────────────────────────
-
-BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
-SPACY_LG_PATH  = os.path.join(BASE_DIR, "local-models", "en_core_web_lg")
-
-
-@st.cache_resource
-def load_spacy_for_ner():
-    """Load spaCy large model only for NER (entity detection for focus phrases)"""
-    try:
-        nlp = spacy.load("en_core_web_lg")
-        return nlp
-    except OSError:
-        st.error(
-            "en_core_web_lg model not found.\n\n"
-            "Please install it using: python -m spacy download en_core_web_lg"
-        )
-        return None
+# Characters to strip from the start of a body after removing the title.
+# Includes ASCII colons/dashes plus Unicode em/en dashes that often join
+# section labels to body text.
+_LEADING_BODY_NOISE = ".!?:;,-—–·| \n\t\r\xa0'\"‘’“”"
 
 
-def fetch_article(url: str) -> tuple[str | None, str | None]:
+def fetch_article(url):
     """Returns (cleaned_text, raw_html)"""
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
@@ -94,252 +100,584 @@ def fetch_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, downloaded
 
 
-def smart_article_cleaning(text: str) -> tuple[str, str | None]:
-    lines = text.split('. ')
-    
+def smart_article_cleaning(text):
+    """
+    Split the extracted article into (body, title).
+    The body is what every summarizer will consume — title is excluded.
+    """
+    text = (text or "").strip()
+    if not text:
+        return "", None
+
     title = None
     body = text
-    
-    first_part = lines[0].strip() if lines else ""
-    
-    if first_part and (first_part.startswith("'") or first_part.startswith('"') or first_part.startswith('‘')):
-        title = first_part.strip("'\"‘’")
-        body = text[len(first_part):].strip()
-        if body.startswith(('.', '!', '?')):
-            body = body[1:].strip()
-    elif len(first_part) < 80 and not first_part.endswith(('.', '!', '?')):
-        title = first_part
-        body = '. '.join(lines[1:]) if len(lines) > 1 else text
+
+    # Strategy 1: title is on its own line at the start.
+    if "\n" in text:
+        first_line, rest = text.split("\n", 1)
+        first_line = first_line.strip()
+        if first_line and len(first_line) < 200 and not first_line.endswith((".", "!", "?")):
+            title = first_line.strip("'\"‘’")
+            body = rest.strip().lstrip(_LEADING_BODY_NOISE)
+            return body, title
+
+    # Strategy 2: title is a short prefix ending at first ". " sentence boundary
+    # where the prefix itself has no internal sentence punctuation.
+    first_period = text.find(". ")
+    if 0 < first_period < 150:
+        candidate_title = text[:first_period].strip()
+        if (
+            candidate_title
+            and "." not in candidate_title
+            and "!" not in candidate_title
+            and "?" not in candidate_title
+            and len(candidate_title) < 150
+        ):
+            title = candidate_title.strip("'\"‘’")
+            body = text[first_period + 2:].strip().lstrip(_LEADING_BODY_NOISE)
+            return body, title
+
+    # Strategy 3: ALL CAPS heading followed by a colon, e.g.
+    #   "BREAKING NEWS HEADLINE: rest of article..."
+    # Match if the prefix before the first `:` is mostly uppercase.
+    first_colon = text.find(":")
+    if 0 < first_colon < 200:
+        candidate = text[:first_colon].strip()
+        letters = [c for c in candidate if c.isalpha()]
+        if letters:
+            upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+            if upper_ratio > 0.6 and len(candidate) < 200:
+                title = candidate.strip("'\"‘’")
+                body = text[first_colon + 1:].strip().lstrip(_LEADING_BODY_NOISE)
+                return body, title
+
+    # Strategy 4: quoted title at the start.
+    if text.startswith(("'", '"', "‘", "“")):
+        for closer in ["'", '"', "’", "”"]:
+            end = text.find(closer, 1)
+            if 0 < end < 200:
+                title = text[1:end].strip()
+                body = text[end + 1:].strip().lstrip(_LEADING_BODY_NOISE)
+                return body, title
 
     return body, title
-    
 
 
-def auto_detect_focus_phrases(text: str, nlp) -> list[str]:
-    """Automatically detect important focus phrases from the article using spaCy NER."""
-    doc = nlp(text[:50000])
-    
-    entities = []
-    for ent in doc.ents:
-        if ent.label_ in ["PERSON", "ORG", "GPE", "PRODUCT", "EVENT", "NORP", "LOC"]:
-            text_clean = ent.text.strip()
-            if 3 < len(text_clean) < 40:
-                entities.append(text_clean)
-    
-    from collections import Counter
-    entity_counts = Counter(entities)
-    top_entities = [entity for entity, count in entity_counts.most_common(10)]
-    
-    if not top_entities:
-        noun_phrases = []
-        for chunk in doc.noun_chunks:
-            if 2 <= len(chunk.text.split()) <= 4 and len(chunk.text) > 5:
-                noun_phrases.append(chunk.text.strip())
-        top_entities = list(dict.fromkeys(noun_phrases))[:7]
-    
-    return top_entities[:7]
+def _strip_title_from_body(body, title):
+    """
+    Safety net: if the title still appears at the start of the body, strip it,
+    along with any leading punctuation/whitespace that joined them.
+    """
+    if not body:
+        return body
+    body = body.lstrip(_LEADING_BODY_NOISE)
+    if not title:
+        return body
+    title_clean = title.strip().strip("'\"‘’")
+    if not title_clean:
+        return body
+    if body.lower().startswith(title_clean.lower()):
+        body = body[len(title_clean):]
+        body = body.lstrip(_LEADING_BODY_NOISE)
+    return body
 
 
-def sumy_textrank_summarize(
-    text: str,
-    n_sentences: int = 6,
-    min_sentence_len: int = 32,
-    focus_phrases: list[str] | None = None,
-    phrase_boost: float = 1.5,
-    diversity_threshold: float = 0.6,
-    bullet_points: bool = False,
-    title: str | None = None,
-) -> dict:
-    """Sumy TextRank summarization with intelligent lead sentence detection and focus phrases."""
-    proc = psutil.Process(os.getpid())
-    ram0 = proc.memory_info().rss / 1024 / 1024
-    t0 = time.monotonic()
+# ── Algorithm 1: PlainTextRankSummarizer ──────────────────────────────────────
 
-    # Remove title from the text if present (for summarization only)
-    clean_text_for_summary = text
-    
-    if title:
-        # Try multiple patterns to remove the title
-        title_clean = title.strip()
+class PlainTextRankSummarizer:
+    """Plain TextRank with the original tokenizer (ASCII-only, no stopword filter)."""
+
+    VERSION = "plain-textrank-v1"
+
+    def __init__(
+        self,
+        *,
+        damping=0.85,
+        max_iterations=40,
+        min_delta=1e-4,
+        sentence_limit=3,
+        min_sentence_words=5,
+        max_summary_chars=600,
+    ):
+        self.damping = damping
+        self.max_iterations = max_iterations
+        self.min_delta = min_delta
+        self.sentence_limit = sentence_limit
+        self.min_sentence_words = min_sentence_words
+        self.max_summary_chars = max_summary_chars
+
+    def summarize(self, text):
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return ""
+        if len(sentences) == 1:
+            return sentences[0][: self.max_summary_chars].strip()
+
+        tokens = [self._tokenize(s) for s in sentences]
+        graph = self._build_similarity_matrix(tokens)
+        ranks = self._page_rank(graph)
+        ranked_indices = sorted(range(len(sentences)), key=lambda idx: ranks[idx], reverse=True)
+        selected_indices = sorted(ranked_indices[: self.sentence_limit])
         
-        # Pattern 1: Title followed by period and space
-        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}. ", "", 1)
-        
-        # Pattern 2: Title followed by space (no period)
-        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean} ", "", 1)
-        
-        # Pattern 3: Title with newline
-        clean_text_for_summary = clean_text_for_summary.replace(f"{title_clean}\n", "", 1)
-        
-        # Pattern 4: Title at beginning with line break
-        lines = clean_text_for_summary.split('\n')
-        if lines and lines[0].strip() == title_clean:
-            lines = lines[1:]
-            clean_text_for_summary = '\n'.join(lines)
-        
-        # Pattern 5: Remove quoted titles (like 'Title here' followed by space)
-        if title_clean.startswith("'") or title_clean.startswith('"') or title_clean.startswith('‘'):
-            quoted_title = title_clean.strip("'\"‘’")
-            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title}. ", "", 1)
-            clean_text_for_summary = clean_text_for_summary.replace(f"{quoted_title} ", "", 1)
+        # FIX: Get the list of sentences first
+        selected_sentences = [sentences[idx] for idx in selected_indices]
+        return self._truncate(selected_sentences)
     
-    # Also remove common title patterns (short first line that doesn't end with period)
-    first_line = clean_text_for_summary.split('\n')[0] if '\n' in clean_text_for_summary else clean_text_for_summary[:100]
-    if len(first_line) < 80 and not first_line.endswith(('.', '!', '?')):
-        # Remove the first line as it's likely a title
-        if '\n' in clean_text_for_summary:
-            clean_text_for_summary = '\n'.join(clean_text_for_summary.split('\n')[1:])
-        else:
-            # Find first period to skip the title
-            period_pos = clean_text_for_summary.find('. ')
-            if period_pos > 0 and period_pos < 100:
-                clean_text_for_summary = clean_text_for_summary[period_pos + 2:]
-    
-    parser = PlaintextParser.from_string(clean_text_for_summary, Tokenizer("english"))
-    summarizer = TextRankSummarizer()
-    
-    all_sentences = [str(sent).strip() for sent in parser.document.sentences]
-    first_proper_sentence = all_sentences[0] if all_sentences else ""
+    def _truncate(self, sentences):
+        summary = ""
+        for sent in sentences:
+            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
+                summary += (sent + " ")
+            else:
+                break
+        return summary.strip() or (sentences[0] if sentences else "")
 
-    summary_sentences = summarizer(parser.document, n_sentences * 2)
-    
-    sent_scores: dict[str, float] = {}
-    for sent in summary_sentences:
-        sent_text = str(sent).strip()
-        if len(sent_text) >= min_sentence_len:
-            sent_scores[sent_text] = sent_scores.get(sent_text, 0) + 1
-    
-    if focus_phrases and len(focus_phrases) > 0:
-        for key in sent_scores:
-            for fp in focus_phrases:
-                if fp.lower() in key.lower():
-                    sent_scores[key] *= phrase_boost
+    def _split_sentences(self, text):
+        if not text:
+            return []
+        raw = re.split(r"(?<=[.!?])\s+", text.strip())
+        out = []
+        for sent in raw:
+            normalized = re.sub(r"\s+", " ", sent).strip()
+            if len(normalized.split()) >= self.min_sentence_words:
+                out.append(normalized)
+        return out
 
-    if not sent_scores:
-        fallback = [s for s in all_sentences if len(s) >= min_sentence_len][:n_sentences]
-        
-        if bullet_points:
-            sentences_list = []
-            for sent in fallback:
-                sent = sent.strip()
-                if sent:
-                    if not sent.endswith(('.', '!', '?')):
-                        sent = sent + '.'
-                    sentences_list.append(f"• {sent}")
-            summary = "\n\n".join(sentences_list)
-        else:
-            summary = " ".join(fallback)
-        
-        return {
-            "summary": summary,
-            "sentences": [(s, 0.0) for s in fallback],
-            "elapsed_s": round(time.monotonic() - t0, 3),
-            "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
-            "method": "fallback",
-        }
+    def _tokenize(self, sentence):
+        return [tok for tok in re.findall(r"[A-Za-z0-9']+", sentence.lower()) if tok]
 
-    top = sorted(sent_scores.items(), key=lambda x: -x[1])[:n_sentences * 2]
+    def _build_similarity_matrix(self, tokens):
+        n = len(tokens)
+        graph = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                graph[i][j] = self._sentence_similarity(tokens[i], tokens[j])
+        return graph
 
-    def _overlap(a: str, b: str) -> float:
-        ta, tb = set(a.lower().split()), set(b.lower().split())
-        if not ta or not tb:
+    def _sentence_similarity(self, left, right):
+        if not left or not right:
             return 0.0
-        return len(ta & tb) / min(len(ta), len(tb))
+        lc, rc = Counter(left), Counter(right)
+        common = set(lc) & set(rc)
+        if not common:
+            return 0.0
+        numerator = sum(lc[t] * rc[t] for t in common)
+        denom = math.sqrt(sum(v * v for v in lc.values())) * math.sqrt(sum(v * v for v in rc.values()))
+        if denom == 0:
+            return 0.0
+        return numerator / denom
 
-    selected: list[tuple[str, float]] = []
-    
-    lead_candidates = []
-    
-    if len(first_proper_sentence) >= min_sentence_len:
-        lead_candidates.append((first_proper_sentence, sent_scores.get(first_proper_sentence, 1.2)))
-    
-    if top:
-        lead_candidates.append(top[0])
-    
-    if lead_candidates:
-        best_lead = max(lead_candidates, key=lambda x: x[1])
-        selected.append(best_lead)
-    
-    for sent_text, score in top:
-        if len(selected) >= n_sentences:
-            break
-        if any(sent_text == s for s, _ in selected):
-            continue
-        if any(_overlap(sent_text, s) > diversity_threshold for s, _ in selected):
-            continue
-        selected.append((sent_text, score))
+    def _page_rank(self, graph):
+        n = len(graph)
+        ranks = [1.0 / n] * n
+        outbound = [sum(graph[i]) for i in range(n)]
+        for _ in range(self.max_iterations):
+            new_ranks = [(1.0 - self.damping) / n] * n
+            for j in range(n):
+                if outbound[j] == 0:
+                    continue
+                contribution = ranks[j] / outbound[j]
+                for i in range(n):
+                    if graph[j][i] > 0:
+                        new_ranks[i] += self.damping * graph[j][i] * contribution
+            delta = sum(abs(new_ranks[i] - ranks[i]) for i in range(n))
+            ranks = new_ranks
+            if delta < self.min_delta:
+                break
+        return ranks
 
-    selected = sorted(
-        selected,
-        key=lambda x: all_sentences.index(x[0]) if x[0] in all_sentences else 9999
+
+# ── Algorithm 2: NltkTextRankSummarizer ───────────────────────────────────────
+
+_ENGLISH_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
+    "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
+    "this", "that", "these", "those", "it", "its", "they", "them",
+    "i", "you", "he", "she", "we", "us", "him", "her", "their", "our",
+    "not", "no", "so", "if", "then", "than", "also", "just", "only",
+    "will", "would", "should", "could", "may", "might", "can", "shall",
+    "about", "into", "out", "up", "down", "over", "under", "again",
+    "any", "all", "some", "such", "what", "which", "who", "whom",
+    "when", "where", "why", "how", "there", "here", "more", "most",
+    "very", "much", "many", "one", "two", "said", "says", "say",
+})
+
+
+class NltkTextRankSummarizer:
+    """TextRank with NLTK sentence splitting, hyphen-aware tokenizer, stopword filter."""
+
+    VERSION = "nltk-textrank-v1"
+
+    def __init__(
+        self,
+        *,
+        damping=0.85,
+        max_iterations=40,
+        min_delta=1e-4,
+        sentence_limit=3,
+        min_sentence_words=5,
+        max_summary_chars=600,
+    ):
+        self.damping = damping
+        self.max_iterations = max_iterations
+        self.min_delta = min_delta
+        self.sentence_limit = sentence_limit
+        self.min_sentence_words = min_sentence_words
+        self.max_summary_chars = max_summary_chars
+
+    def summarize(self, text):
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return ""
+        
+        # Use _truncate here too instead of [: self.max_summary_chars]
+        if len(sentences) == 1:
+            return self._truncate(sentences)
+
+        tokens = [self._tokenize(s) for s in sentences]
+        valid_indices = [i for i, t in enumerate(tokens) if t]
+        
+        if len(valid_indices) <= 1:
+            # FIX: Pass the slice as a list, don't join it yet
+            return self._truncate(sentences[: self.sentence_limit])
+
+        valid_tokens = [tokens[i] for i in valid_indices]
+        graph = self._build_similarity_matrix(valid_tokens)
+        ranks = self._page_rank(graph)
+        
+        ranked_pairs = sorted(zip(valid_indices, ranks), key=lambda p: p[1], reverse=True)
+        chosen_indices = sorted(idx for idx, _ in ranked_pairs[: self.sentence_limit])
+        
+        # FIX: Pass the list of sentences
+        selected_sentences = [sentences[idx] for idx in chosen_indices]
+        return self._truncate(selected_sentences)
+    
+
+    def _truncate(self, sentences):
+        summary = ""
+        for sent in sentences:
+            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
+                summary += (sent + " ")
+            else:
+                break
+        return summary.strip() or (sentences[0] if sentences else "")
+
+    def _split_sentences(self, text):
+        if not text:
+            return []
+        raw = nltk.sent_tokenize(text.strip(), language="english")
+        out = []
+        for sent in raw:
+            normalized = re.sub(r"\s+", " ", sent).strip()
+            if len(normalized.split()) >= self.min_sentence_words:
+                out.append(normalized)
+        return out
+
+    def _tokenize(self, sentence):
+        text = sentence.lower().replace("\u2019", "'").replace("\u2018", "'")
+        raw = re.findall(r"\w+(?:[-'.]\w+)*", text, flags=re.UNICODE)
+        cleaned = []
+        for tok in raw:
+            tok = tok.strip("'-.")
+            if tok and tok not in _ENGLISH_STOPWORDS:
+                cleaned.append(tok)
+        return cleaned
+
+    def _build_similarity_matrix(self, tokens):
+        n = len(tokens)
+        graph = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                sim = self._sentence_similarity(tokens[i], tokens[j])
+                graph[i][j] = sim
+                graph[j][i] = sim
+        return graph
+
+    def _sentence_similarity(self, left, right):
+        if not left or not right:
+            return 0.0
+        lc, rc = Counter(left), Counter(right)
+        common = set(lc) & set(rc)
+        if not common:
+            return 0.0
+        numerator = sum(lc[t] * rc[t] for t in common)
+        ln = math.sqrt(sum(v * v for v in lc.values()))
+        rn = math.sqrt(sum(v * v for v in rc.values()))
+        denom = ln * rn
+        if denom == 0:
+            return 0.0
+        return numerator / denom
+
+    def _page_rank(self, graph):
+        n = len(graph)
+        ranks = [1.0 / n] * n
+        outbound = [sum(graph[i]) for i in range(n)]
+        for _ in range(self.max_iterations):
+            new_ranks = [(1.0 - self.damping) / n] * n
+            for j in range(n):
+                if outbound[j] == 0:
+                    continue
+                contribution = ranks[j] / outbound[j]
+                for i in range(n):
+                    if graph[j][i] > 0:
+                        new_ranks[i] += self.damping * graph[j][i] * contribution
+            delta = sum(abs(new_ranks[i] - ranks[i]) for i in range(n))
+            ranks = new_ranks
+            if delta < self.min_delta:
+                break
+        return ranks
+
+
+# ── Algorithm 3: MiniLmTextRankSummarizer ─────────────────────────────────────
+
+_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_LOCAL_MODELS_DIR = Path(os.environ.get("LOCAL_MODELS_DIR", str(DEFAULT_LOCAL_MODELS)))
+_LOCAL_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@st.cache_resource
+def _get_minilm_model():
+    """
+    Load MiniLM once per Streamlit session. On first run, downloads from
+    HuggingFace and saves a local snapshot under ./local-models/. Subsequent
+    runs (and subsequent app starts) load from the local snapshot — no
+    network calls, no re-downloads.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    local_path = _LOCAL_MODELS_DIR / "all-MiniLM-L6-v2"
+
+    # Cached snapshot: load from disk.
+    if local_path.exists() and any(local_path.iterdir()):
+        logger.info("Loading MiniLM from local snapshot at %s", local_path)
+        return SentenceTransformer(str(local_path), device="cpu")
+
+    # No snapshot yet: download then save for next time.
+    logger.warning(
+        "No local MiniLM snapshot at %s; downloading %s from HuggingFace hub "
+        "and saving to local snapshot for future runs.",
+        local_path, _MODEL_NAME,
+    )
+    model = SentenceTransformer(_MODEL_NAME, device="cpu")
+    try:
+        model.save(str(local_path))
+        logger.info("Saved MiniLM snapshot to %s", local_path)
+    except Exception as exc:
+        logger.warning("Failed to save MiniLM snapshot to %s: %s", local_path, exc)
+    return model
+
+
+class MiniLmTextRankSummarizer:
+    """TextRank with MiniLM sentence embeddings for semantic similarity."""
+
+    VERSION = "minilm-textrank-v1"
+
+    def __init__(
+        self,
+        *,
+        damping=0.85,
+        max_iterations=40,
+        min_delta=1e-4,
+        sentence_limit=3,
+        min_sentence_words=5,
+        max_summary_chars=600,
+        similarity_floor=0.1,
+    ):
+        self.damping = damping
+        self.max_iterations = max_iterations
+        self.min_delta = min_delta
+        self.sentence_limit = sentence_limit
+        self.min_sentence_words = min_sentence_words
+        self.max_summary_chars = max_summary_chars
+        self.similarity_floor = similarity_floor
+
+    def summarize(self, text):
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return ""
+        if len(sentences) == 1:
+            return sentences[0][: self.max_summary_chars].strip()
+        if len(sentences) <= self.sentence_limit:
+            return self._truncate(sentences)
+
+        graph = self._build_similarity_matrix(sentences)
+        ranks = self._page_rank(graph)
+        ranked_indices = sorted(range(len(sentences)), key=lambda idx: ranks[idx], reverse=True)
+        selected_indices = sorted(ranked_indices[:self.sentence_limit])
+        
+        # FIX: Use the helper method here too
+        selected_sentences = [sentences[i] for i in selected_indices]
+        return self._truncate(selected_sentences)
+
+    def _truncate(self, sentences):
+        summary = ""
+        for sent in sentences:
+            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
+                summary += (sent + " ")
+            else:
+                break
+        return summary.strip() or (sentences[0] if sentences else "")
+    
+
+    def _truncate(self, sentences):
+        """
+        Combines selected sentences but stops before exceeding 
+        max_summary_chars to ensure no sentence is cut in half.
+        """
+        summary = ""
+        for sent in sentences:
+            # Check if adding the next sentence exceeds the limit
+            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
+                summary += (sent + " ")
+            else:
+                break
+        return summary.strip()
+
+    def _split_sentences(self, text):
+        if not text:
+            return []
+        raw = nltk.sent_tokenize(text.strip(), language="english")
+        out = []
+        for sent in raw:
+            normalized = re.sub(r"\s+", " ", sent).strip()
+            if len(normalized.split()) >= self.min_sentence_words:
+                out.append(normalized)
+        return out
+
+    def _build_similarity_matrix(self, sentences):
+        import numpy as np
+
+        model = _get_minilm_model()
+        embeddings = model.encode(
+            sentences,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        sim_matrix = embeddings @ embeddings.T
+        np.fill_diagonal(sim_matrix, 0.0)
+        sim_matrix = np.where(sim_matrix < self.similarity_floor, 0.0, sim_matrix)
+        return sim_matrix.tolist()
+
+    def _page_rank(self, graph):
+        n = len(graph)
+        ranks = [1.0 / n] * n
+        outbound = [sum(graph[i]) for i in range(n)]
+        for _ in range(self.max_iterations):
+            new_ranks = [(1.0 - self.damping) / n] * n
+            for j in range(n):
+                if outbound[j] == 0:
+                    continue
+                contribution = ranks[j] / outbound[j]
+                for i in range(n):
+                    if graph[j][i] > 0:
+                        new_ranks[i] += self.damping * graph[j][i] * contribution
+            delta = sum(abs(new_ranks[i] - ranks[i]) for i in range(n))
+            ranks = new_ranks
+            if delta < self.min_delta:
+                break
+        return ranks
+
+
+# ── Algorithm registry ────────────────────────────────────────────────────────
+
+ALGORITHMS = {
+    "Plain TextRank (original)": PlainTextRankSummarizer,
+    "NLTK TextRank (Punkt + stopwords)": NltkTextRankSummarizer,
+    "MiniLM TextRank (semantic embeddings)": MiniLmTextRankSummarizer,
+}
+
+
+def run_summarizer(
+    algorithm_name,
+    body,
+    *,
+    sentence_limit,
+    min_sentence_words,
+    max_summary_chars,
+):
+    """Run a single summarizer and capture benchmarks."""
+    summarizer_cls = ALGORITHMS[algorithm_name]
+    summarizer = summarizer_cls(
+        sentence_limit=sentence_limit,
+        min_sentence_words=min_sentence_words,
+        max_summary_chars=max_summary_chars,
     )
 
-    summary_sentences_final = [s for s, _ in selected]
-    
-    cleaned_sentences = []
-    for sent in summary_sentences_final:
-        sent = re.sub(r'\s+', ' ', sent)
-        if not sent.endswith(('.', '!', '?')):
-            sent = sent + '.'
-        sent = re.sub(r'\.\.+', '.', sent)
-        cleaned_sentences.append(sent)
-    
-    if bullet_points:
-        bullet_list = [f"• {sent}" for sent in cleaned_sentences]
-        summary = "\n\n".join(bullet_list)
-    else:
-        summary = " ".join(cleaned_sentences)
-    
-    if summary and not summary[0].isupper():
-        summary = summary[0].upper() + summary[1:]
+    proc = psutil.Process(os.getpid())
+    ram_before = proc.memory_info().rss / 1024 / 1024
+    t0 = time.monotonic()
+    try:
+        summary = summarizer.summarize(body)
+        error = None
+    except Exception as exc:
+        logger.exception("Summarizer %s failed", algorithm_name)
+        summary = ""
+        error = str(exc)
+    elapsed = time.monotonic() - t0
+    ram_after = proc.memory_info().rss / 1024 / 1024
+    ram_delta = ram_after - ram_before
 
     return {
+        "algorithm": algorithm_name,
+        "version": summarizer.VERSION,
         "summary": summary,
-        "sentences": selected,
-        "elapsed_s": round(time.monotonic() - t0, 3),
-        "ram_mb": round(proc.memory_info().rss / 1024 / 1024 - ram0, 1),
-        "method": "textrank",
+        "summary_chars": len(summary),
+        "summary_words": len(summary.split()) if summary else 0,
+        "elapsed_s": round(elapsed, 3),
+        "ram_before_mb": round(ram_before, 1),
+        "ram_after_mb": round(ram_after, 1),
+        "ram_delta_mb": round(ram_delta, 1),
+        "error": error,
     }
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
-st.title("Article Analyzer")
+st.title("Article Summarizer — Algorithm Comparison")
 
 with st.sidebar:
     st.header("Settings")
 
-    url = st.text_input(
-        "Article URL",
-        placeholder="https://..."
-    )
+    url = st.text_input("Article URL", placeholder="https://...")
+
+    st.divider()
+    st.subheader("Algorithms to run")
+
+    selected_algorithms = []
+    if st.checkbox("Plain TextRank (original)", value=True, key="alg_plain"):
+        selected_algorithms.append("Plain TextRank (original)")
+    if st.checkbox("NLTK TextRank (Punkt + stopwords)", value=True, key="alg_nltk"):
+        selected_algorithms.append("NLTK TextRank (Punkt + stopwords)")
+    if st.checkbox("MiniLM TextRank (semantic embeddings)", value=True, key="alg_minilm"):
+        selected_algorithms.append("MiniLM TextRank (semantic embeddings)")
 
     st.divider()
     st.subheader("Summarization Settings")
-    
-    n_sentences = st.slider("Number of sentences", 2, 15, 6,
-                            help="More sentences = more detailed summary")
-    
-    min_sent_len = st.slider("Min sentence length (chars)", 20, 100, 32,
-                             help="Shorter = more sentences included")
-    
-    st.divider()
-    
-    bullet_points = st.checkbox("Show summary as bullet points", value=False,
-                                help="Convert summary into easy-to-read bullet points")
-    
-    st.divider()
-    
-    btn_summarize = st.button("Analyze Article", type="primary", width="stretch")
+
+    sentence_limit = st.slider(
+        "Number of sentences", 2, 15, 5,
+        help="How many sentences each summarizer should pick.",
+    )
+    min_sent_words = st.slider(
+        "Min sentence length (words)", 3, 20, 5,
+        help="Sentences shorter than this are skipped during ranking.",
+    )
+    max_summary_chars = st.slider(
+        "Max summary length (chars)", 200, 2000, 600, step=50,
+        help="Soft cap on the final summary length.",
+    )
 
     st.divider()
-    st.subheader("Category Extraction")
-    btn_categories = st.button("Extract Categories", type="secondary", width="stretch")
+    btn_summarize = st.button("Summarize Article", type="primary", width="stretch")
 
 
-# ── Fetch article (shared between both tasks) ─────────────────────────────────
+# ── Fetch article (cached in session_state) ───────────────────────────────────
 
-def get_article(url: str) -> tuple[str | None, str | None]:
+def get_article(url):
     if (
         "article_url" in st.session_state
         and st.session_state["article_url"] == url.strip()
@@ -358,203 +696,74 @@ def get_article(url: str) -> tuple[str | None, str | None]:
     return cleaned, html
 
 
-# Initialize session state variables
-if "article_loaded" not in st.session_state:
-    st.session_state.article_loaded = False
-if "full_text" not in st.session_state:
-    st.session_state.full_text = None
-if "article_title" not in st.session_state:
-    st.session_state.article_title = None
-if "spacy_model" not in st.session_state:
-    st.session_state.spacy_model = None
-if "auto_focus_phrases" not in st.session_state:
-    st.session_state.auto_focus_phrases = []
-if "focus_phrases_selected" not in st.session_state:
-    st.session_state.focus_phrases_selected = []
-if "phrase_boost" not in st.session_state:
-    st.session_state.phrase_boost = 1.5
-if "apply_focus" not in st.session_state:
-    st.session_state.apply_focus = False
-if "initial_summary_generated" not in st.session_state:
-    st.session_state.initial_summary_generated = False
+# ── Run summarization on click ────────────────────────────────────────────────
 
-
-# Load article and generate initial summary when button is clicked
-if btn_summarize and url:
-    with st.spinner("Fetching and analyzing article..."):
-        cleaned, _ = get_article(url)
-        if cleaned:
-            body_text, article_title = smart_article_cleaning(cleaned)
-            spacy_nlp = load_spacy_for_ner()
-            
-            if spacy_nlp:
-                auto_phrases = auto_detect_focus_phrases(body_text, spacy_nlp)
-                
-                st.session_state.full_text = body_text
-                st.session_state.article_title = article_title
-                st.session_state.auto_focus_phrases = auto_phrases
-                st.session_state.spacy_model = spacy_nlp
-                st.session_state.article_loaded = True
-                st.session_state.apply_focus = False
-                st.session_state.initial_summary_generated = False
-                
-                with st.spinner("Generating initial summary..."):
-                    initial_result = sumy_textrank_summarize(
-                        body_text,
-                        n_sentences=n_sentences,
-                        min_sentence_len=min_sent_len,
-                        focus_phrases=None,
-                        phrase_boost=1.5,
-                        diversity_threshold=0.6,
-                        bullet_points=bullet_points,
-                        title=article_title,
-                    )
-                
-                st.session_state["summary_result"] = initial_result
-                st.session_state["summary_text"] = body_text
-                st.session_state["focus_phrases_used"] = []
-                st.session_state.initial_summary_generated = True
-                
-                st.rerun()
-
-# Display focus phrase selection UI (only after article is loaded)
-if st.session_state.article_loaded and st.session_state.full_text:
-    
-    if st.session_state.article_title:
-        st.info(f"Article: {st.session_state.article_title}")
-    
-    if st.session_state.auto_focus_phrases:
-        st.info(f"Detected key topics: {', '.join(st.session_state.auto_focus_phrases[:5])}")
-        
-        selected = st.multiselect(
-            "Select phrases to focus on (optional):",
-            options=st.session_state.auto_focus_phrases,
-            default=st.session_state.focus_phrases_selected,
-            help="Selecting phrases makes the summary emphasize these topics",
-            key="focus_phrases_multiselect"
-        )
-        
-        current_boost = st.session_state.phrase_boost
-        if current_boost < 1.0 or current_boost > 2.5:
-            current_boost = 1.5
-        
-        boost = st.slider(
-            "Emphasis strength for selected phrases:",
-            1.0, 2.5, current_boost, 0.1,
-            help="Higher = more weight on sentences containing selected phrases",
-            key="phrase_boost_slider"
-        )
-        
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            apply_btn = st.button("Apply Focus Phrases & Regenerate", key="apply_focus_btn")
-        
-        if apply_btn:
-            st.session_state.focus_phrases_selected = selected
-            st.session_state.phrase_boost = boost
-            st.session_state.apply_focus = True
-            
-            with st.spinner("Regenerating summary with focus phrases..."):
-                if st.session_state.apply_focus and st.session_state.focus_phrases_selected:
-                    focus_to_use = st.session_state.focus_phrases_selected
-                    boost_to_use = st.session_state.phrase_boost
-                else:
-                    focus_to_use = None
-                    boost_to_use = 1.5
-                
-                new_result = sumy_textrank_summarize(
-                    st.session_state.full_text,
-                    n_sentences=n_sentences,
-                    min_sentence_len=min_sent_len,
-                    focus_phrases=focus_to_use,
-                    phrase_boost=boost_to_use,
-                    diversity_threshold=0.6,
-                    bullet_points=bullet_points,
-                    title=st.session_state.article_title,
-                )
-            
-            st.session_state["summary_result"] = new_result
-            st.session_state["focus_phrases_used"] = focus_to_use if focus_to_use else []
-            st.rerun()
-
-
-# ── Render summary result ─────────────────────────────────────────────────────
-
-if "summary_result" in st.session_state:
-    result = st.session_state["summary_result"]
-    cleaned = st.session_state["summary_text"]
-    focus_phrases_used = st.session_state.get("focus_phrases_used", [])
-
-    st.header("Summary")
-
-    c1, c2, c3 = st.columns(3)
-    with c1: 
-        st.metric("Time", f"{result['elapsed_s']}s")
-    with c2: 
-        st.metric("RAM delta", f"{result['ram_mb']} MB")
-    with c3: 
-        if bullet_points:
-            st.metric("Bullet points", len(result["summary"].split('\n')))
-        else:
-            st.metric("Sentences", len(result["sentences"]))
-
-    if focus_phrases_used:
-        st.info(f"Focusing on: {', '.join(focus_phrases_used)} (with {st.session_state.get('phrase_boost', 1.5)}x boost)")
-
-    if bullet_points:
-        st.markdown("### Summary (Bullet Points)")
-        st.markdown(result["summary"])
-    else:
-        st.markdown("### Summary")
-        st.markdown(result["summary"])
-
-    with st.expander("Full article text"):
-        st.write(cleaned)
-
-    if result["sentences"] and any(s > 0 for _, s in result["sentences"]):
-        with st.expander("Sentence Scores (Debug)"):
-            max_score = max(s for _, s in result["sentences"]) or 1
-            for sent_text, score in sorted(result["sentences"], key=lambda x: -x[1]):
-                bar_w = int(score / max_score * 100)
-                st.markdown(
-                    f'<div style="margin-bottom:10px">'
-                    f'<div style="font-size:13px;margin-bottom:4px">{sent_text}</div>'
-                    f'<div style="display:flex;align-items:center;gap:8px">'
-                    f'<div style="flex:1;background:#e0e0e0;border-radius:3px;height:5px">'
-                    f'<div style="width:{bar_w}%;background:#1f77b4;height:5px;border-radius:3px"></div>'
-                    f'</div>'
-                    f'<span style="font-family:monospace;font-size:11px;color:#666">{score:.4f}</span>'
-                    f'</div></div>',
-                    unsafe_allow_html=True
-                )
-
-
-# ── Category extraction task ──────────────────────────────────────────────────
-
-if btn_categories:
+if btn_summarize:
     if not url:
         st.warning("Enter a URL first.")
+    elif not selected_algorithms:
+        st.warning("Select at least one algorithm to run.")
     else:
-        cleaned, html = get_article(url)
+        cleaned, _ = get_article(url)
         if not cleaned:
             st.error("Could not extract content from this URL.")
         else:
-            from category_extractor import run_extraction, render_cat_results
+            body_text, article_title = smart_article_cleaning(cleaned)
+            body_text = _strip_title_from_body(body_text, article_title)
+
+            results = []
+            for algo_name in selected_algorithms:
+                with st.spinner(f"Running {algo_name}..."):
+                    result = run_summarizer(
+                        algo_name,
+                        body_text,
+                        sentence_limit=sentence_limit,
+                        min_sentence_words=min_sent_words,
+                        max_summary_chars=max_summary_chars,
+                    )
+                results.append(result)
+
+            st.session_state["results"] = results
+            st.session_state["body_text"] = body_text
+            st.session_state["article_title"] = article_title
+
+
+# ── Render results ────────────────────────────────────────────────────────────
+
+if "results" in st.session_state:
+    results = st.session_state["results"]
+    body_text = st.session_state["body_text"]
+    article_title = st.session_state.get("article_title")
+
+    if article_title:
+        st.info(f"**Article title:** {article_title}")
+    st.caption(
+        f"Body length: {len(body_text):,} chars / {len(body_text.split()):,} words. "
+        "Every algorithm receives this body (title excluded)."
+    )
+
+    st.header("Results")
+
+    for i, r in enumerate(results):
+        if i > 0:
             st.divider()
-            st.header("Category Extraction and NER Tagging")
-            
-            with st.spinner("Extracting categories and entities..."):
-                cat_result = run_extraction(cleaned, html)
-            
-            st.session_state["cat_result"] = cat_result
-            st.session_state["cat_text"] = cleaned
-            render_cat_results(cat_result)
 
+        st.subheader(f"📊 {r['algorithm']}")
+        st.caption(f"version: `{r['version']}`")
 
-# ── Render category result (persists independently) ───────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Time", f"{r['elapsed_s']}s")
+        c2.metric("RAM delta", f"{r['ram_delta_mb']} MB")
+        c3.metric("Chars", r["summary_chars"])
+        c4.metric("Words", r["summary_words"])
 
-if "cat_result" in st.session_state and not btn_categories:
-    from category_extractor import render_cat_results
-    st.divider()
-    st.header("Category Extraction and NER Tagging")
-    render_cat_results(st.session_state["cat_result"])
+        if r["error"]:
+            st.error(r["error"])
+        elif not r["summary"]:
+            st.warning("Empty summary produced.")
+        else:
+            st.markdown("**Summary:**")
+            st.markdown(r["summary"])
+
+    with st.expander("Show full article body (input to every summarizer)"):
+        st.write(body_text)
