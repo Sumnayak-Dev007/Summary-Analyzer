@@ -64,7 +64,8 @@ NOISE_PATTERNS = re.compile(
     r"home loan|personal loan|car loan|education loan|"
     r"senior copy editor|copy editor|contributing writer|"
     r"for any tips and queries|reach out to|master's degree|"
-    r"@abpnetwork|@gmail|@yahoo)",
+    r"@abpnetwork|@gmail|@yahoo|"
+    r"list of \d+ items|list \d+ of \d+)",  
     re.IGNORECASE,
 )
 
@@ -185,7 +186,10 @@ def _strip_title_from_body(body, title):
 # ── Algorithm 1: PlainTextRankSummarizer ──────────────────────────────────────
 
 class PlainTextRankSummarizer:
-    """Plain TextRank with the original tokenizer (ASCII-only, no stopword filter)."""
+    """
+    Plain TextRank implementation with constants-only tuning.
+    Faithful port of the production summarizer — no behavioral changes.
+    """
 
     VERSION = "plain-textrank-v1"
 
@@ -213,76 +217,72 @@ class PlainTextRankSummarizer:
         if len(sentences) == 1:
             return sentences[0][: self.max_summary_chars].strip()
 
-        tokens = [self._tokenize(s) for s in sentences]
+        tokens = [self._tokenize(sentence) for sentence in sentences]
         graph = self._build_similarity_matrix(tokens)
         ranks = self._page_rank(graph)
         ranked_indices = sorted(range(len(sentences)), key=lambda idx: ranks[idx], reverse=True)
-        selected_indices = sorted(ranked_indices[: self.sentence_limit])
-        
-        # FIX: Get the list of sentences first
-        selected_sentences = [sentences[idx] for idx in selected_indices]
-        return self._truncate(selected_sentences)
-    
-    def _truncate(self, sentences):
-        summary = ""
-        for sent in sentences:
-            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
-                summary += (sent + " ")
-            else:
-                break
-        return summary.strip() or (sentences[0] if sentences else "")
+        selected = sorted(ranked_indices[: self.sentence_limit])
+
+        summary = " ".join(sentences[idx] for idx in selected).strip()
+        if len(summary) <= self.max_summary_chars:
+            return summary
+        return summary[: self.max_summary_chars].rsplit(" ", 1)[0].strip()
 
     def _split_sentences(self, text):
         if not text:
             return []
         raw = re.split(r"(?<=[.!?])\s+", text.strip())
-        out = []
-        for sent in raw:
-            normalized = re.sub(r"\s+", " ", sent).strip()
+        sentences = []
+        for sentence in raw:
+            normalized = re.sub(r"\s+", " ", sentence).strip()
             if len(normalized.split()) >= self.min_sentence_words:
-                out.append(normalized)
-        return out
+                sentences.append(normalized)
+        return sentences
 
     def _tokenize(self, sentence):
         return [tok for tok in re.findall(r"[A-Za-z0-9']+", sentence.lower()) if tok]
 
-    def _build_similarity_matrix(self, tokens):
-        n = len(tokens)
-        graph = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            for j in range(n):
+    def _build_similarity_matrix(self, tokenized_sentences):
+        count = len(tokenized_sentences)
+        graph = [[0.0 for _ in range(count)] for _ in range(count)]
+        for i in range(count):
+            for j in range(count):
                 if i == j:
                     continue
-                graph[i][j] = self._sentence_similarity(tokens[i], tokens[j])
+                graph[i][j] = self._sentence_similarity(tokenized_sentences[i], tokenized_sentences[j])
         return graph
 
     def _sentence_similarity(self, left, right):
         if not left or not right:
             return 0.0
-        lc, rc = Counter(left), Counter(right)
-        common = set(lc) & set(rc)
+        left_counter = Counter(left)
+        right_counter = Counter(right)
+        common = set(left_counter.keys()) & set(right_counter.keys())
         if not common:
             return 0.0
-        numerator = sum(lc[t] * rc[t] for t in common)
-        denom = math.sqrt(sum(v * v for v in lc.values())) * math.sqrt(sum(v * v for v in rc.values()))
-        if denom == 0:
+        numerator = sum(left_counter[token] * right_counter[token] for token in common)
+        denominator = math.sqrt(sum(v * v for v in left_counter.values())) * math.sqrt(
+            sum(v * v for v in right_counter.values())
+        )
+        if denominator == 0:
             return 0.0
-        return numerator / denom
+        return numerator / denominator
 
     def _page_rank(self, graph):
-        n = len(graph)
-        ranks = [1.0 / n] * n
-        outbound = [sum(graph[i]) for i in range(n)]
+        count = len(graph)
+        ranks = [1.0 / count for _ in range(count)]
+        outbound = [sum(graph[i]) for i in range(count)]
+
         for _ in range(self.max_iterations):
-            new_ranks = [(1.0 - self.damping) / n] * n
-            for j in range(n):
+            new_ranks = [(1.0 - self.damping) / count for _ in range(count)]
+            for j in range(count):
                 if outbound[j] == 0:
                     continue
                 contribution = ranks[j] / outbound[j]
-                for i in range(n):
+                for i in range(count):
                     if graph[j][i] > 0:
                         new_ranks[i] += self.damping * graph[j][i] * contribution
-            delta = sum(abs(new_ranks[i] - ranks[i]) for i in range(n))
+            delta = sum(abs(new_ranks[i] - ranks[i]) for i in range(count))
             ranks = new_ranks
             if delta < self.min_delta:
                 break
@@ -357,13 +357,19 @@ class NltkTextRankSummarizer:
     
 
     def _truncate(self, sentences):
-        summary = ""
+        parts = []
+        used = 0
         for sent in sentences:
-            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
-                summary += (sent + " ")
-            else:
-                break
-        return summary.strip() or (sentences[0] if sentences else "")
+            add_len = len(sent) + (1 if parts else 0)
+            if used + add_len <= self.max_summary_chars:
+                parts.append(sent)
+                used += add_len
+
+        if parts:
+            return " ".join(parts).strip()
+        if sentences:
+            return min(sentences, key=len).strip()
+        return ""
 
     def _split_sentences(self, text):
         if not text:
@@ -499,7 +505,7 @@ class MiniLmTextRankSummarizer:
         if not sentences:
             return ""
         if len(sentences) == 1:
-            return sentences[0][: self.max_summary_chars].strip()
+            return sentences[0].strip()
         if len(sentences) <= self.sentence_limit:
             return self._truncate(sentences)
 
@@ -513,28 +519,20 @@ class MiniLmTextRankSummarizer:
         return self._truncate(selected_sentences)
 
     def _truncate(self, sentences):
-        summary = ""
+        parts = []
+        used = 0
         for sent in sentences:
-            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
-                summary += (sent + " ")
-            else:
-                break
-        return summary.strip() or (sentences[0] if sentences else "")
-    
+            add_len = len(sent) + (1 if parts else 0)
+            if used + add_len <= self.max_summary_chars:
+                parts.append(sent)
+                used += add_len
 
-    def _truncate(self, sentences):
-        """
-        Combines selected sentences but stops before exceeding 
-        max_summary_chars to ensure no sentence is cut in half.
-        """
-        summary = ""
-        for sent in sentences:
-            # Check if adding the next sentence exceeds the limit
-            if len(summary) + len(sent) + 1 <= self.max_summary_chars:
-                summary += (sent + " ")
-            else:
-                break
-        return summary.strip()
+        if parts:
+            return " ".join(parts).strip()
+        if sentences:
+            return min(sentences, key=len).strip()
+        return ""
+    
 
     def _split_sentences(self, text):
         if not text:
@@ -748,7 +746,7 @@ if "results" in st.session_state:
         if i > 0:
             st.divider()
 
-        st.subheader(f"📊 {r['algorithm']}")
+        st.subheader(f"{r['algorithm']}")
         st.caption(f"version: `{r['version']}`")
 
         c1, c2, c3, c4 = st.columns(4)
