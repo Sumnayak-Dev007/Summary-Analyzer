@@ -10,6 +10,7 @@ import nltk
 import psutil
 import streamlit as st
 import trafilatura
+from langdetect import DetectorFactory, LangDetectException, detect
 
 logger = logging.getLogger(__name__)
 
@@ -18,35 +19,48 @@ st.set_page_config(
     layout="wide",
 )
 
+# Make langdetect deterministic — same input always detects the same language.
+DetectorFactory.seed = 0
+
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_LOCAL_MODELS = BASE_DIR / "local-models"
-DEFAULT_NLTK_DATA = BASE_DIR / ".nltk_data"
+_BASE_DIR = Path(__file__).resolve().parent
+_DEFAULT_NLTK_DATA = _BASE_DIR / ".nltk_data"
+_DEFAULT_LOCAL_MODELS = _BASE_DIR / "local-models"
 
 
 # ── NLTK setup ────────────────────────────────────────────────────────────────
 
-_NLTK_DATA_DIR = os.environ.get("NLTK_DATA", str(DEFAULT_NLTK_DATA))
+_NLTK_DATA_DIR = os.environ.get("NLTK_DATA", str(_DEFAULT_NLTK_DATA))
 os.makedirs(_NLTK_DATA_DIR, exist_ok=True)
 if _NLTK_DATA_DIR not in nltk.data.path:
     nltk.data.path.insert(0, _NLTK_DATA_DIR)
 
 
-def _ensure_punkt():
-    for resource in ("tokenizers/punkt_tab/english", "tokenizers/punkt/english.pickle"):
-        try:
-            nltk.data.find(resource)
-            return
-        except LookupError:
-            continue
+def _ensure_nltk_data():
+    """Ensure Punkt and stopwords are cached locally. Idempotent."""
     try:
-        nltk.download("punkt_tab", download_dir=_NLTK_DATA_DIR, quiet=True)
-    except Exception:
-        nltk.download("punkt", download_dir=_NLTK_DATA_DIR, quiet=True)
+        nltk.data.find("tokenizers/punkt_tab")
+    except LookupError:
+        try:
+            nltk.data.find("tokenizers/punkt")
+        except LookupError:
+            try:
+                nltk.download("punkt_tab", download_dir=_NLTK_DATA_DIR, quiet=True)
+            except Exception:
+                nltk.download("punkt", download_dir=_NLTK_DATA_DIR, quiet=True)
+
+    try:
+        nltk.data.find("corpora/stopwords")
+    except LookupError:
+        try:
+            nltk.download("stopwords", download_dir=_NLTK_DATA_DIR, quiet=True)
+        except Exception:
+            pass
 
 
-_ensure_punkt()
+_ensure_nltk_data()
 
 
 # ── Article fetching / cleaning ───────────────────────────────────────────────
@@ -65,14 +79,52 @@ NOISE_PATTERNS = re.compile(
     r"senior copy editor|copy editor|contributing writer|"
     r"for any tips and queries|reach out to|master's degree|"
     r"@abpnetwork|@gmail|@yahoo|"
-    r"list of \d+ items|list \d+ of \d+)",  
+    r"list of \d+ items|list \d+ of \d+|"
+    r"^image id:|^title:)",
     re.IGNORECASE,
 )
 
 # Characters to strip from the start of a body after removing the title.
-# Includes ASCII colons/dashes plus Unicode em/en dashes that often join
-# section labels to body text.
 _LEADING_BODY_NOISE = ".!?:;,-—–·| \n\t\r\xa0'\"‘’“”"
+
+_BYLINE_PATTERN = re.compile(
+    r"\b[A-Z][a-z]+ [A-Z][a-z]+\d{1,2} \w{3,9} \d{4}",
+    re.UNICODE,
+)
+
+
+def is_aggregation_page(body):
+    """
+    Detect topic/tag pages, RSS feeds, and category listings. These
+    produce nonsense summaries because the input is multiple unrelated
+    articles, not a single coherent narrative.
+    """
+    if not body or len(body) < 100:
+        return False
+    try:
+        sentences = nltk.sent_tokenize(body, language="english")
+    except LookupError:
+        sentences = re.split(r"(?<=[.!?])\s+", body)
+    if len(sentences) < 10:
+        return False
+
+    backref_words = {
+        "he", "she", "it", "they", "his", "her", "their", "them",
+        "this", "that", "these", "those", "such", "however", "but",
+        "additionally", "moreover", "meanwhile", "later", "also",
+    }
+    backrefs = 0
+    for sent in sentences:
+        toks = sent.lower().split()[:1]
+        if toks and toks[0].rstrip(",.;:") in backref_words:
+            backrefs += 1
+    if backrefs / len(sentences) < 0.15:
+        return True
+
+    if len(_BYLINE_PATTERN.findall(body)) >= 3:
+        return True
+
+    return False
 
 
 def fetch_article(url):
@@ -95,6 +147,8 @@ def fetch_article(url):
         if len(line) < 40:
             continue
         if NOISE_PATTERNS.search(line):
+            continue
+        if _BYLINE_PATTERN.search(line):
             continue
         lines.append(line)
     cleaned = " ".join(lines) if lines else None
@@ -122,8 +176,7 @@ def smart_article_cleaning(text):
             body = rest.strip().lstrip(_LEADING_BODY_NOISE)
             return body, title
 
-    # Strategy 2: title is a short prefix ending at first ". " sentence boundary
-    # where the prefix itself has no internal sentence punctuation.
+    # Strategy 2: title is a short prefix ending at first ". "
     first_period = text.find(". ")
     if 0 < first_period < 150:
         candidate_title = text[:first_period].strip()
@@ -138,9 +191,7 @@ def smart_article_cleaning(text):
             body = text[first_period + 2:].strip().lstrip(_LEADING_BODY_NOISE)
             return body, title
 
-    # Strategy 3: ALL CAPS heading followed by a colon, e.g.
-    #   "BREAKING NEWS HEADLINE: rest of article..."
-    # Match if the prefix before the first `:` is mostly uppercase.
+    # Strategy 3: ALL CAPS heading followed by a colon.
     first_colon = text.find(":")
     if 0 < first_colon < 200:
         candidate = text[:first_colon].strip()
@@ -165,10 +216,7 @@ def smart_article_cleaning(text):
 
 
 def _strip_title_from_body(body, title):
-    """
-    Safety net: if the title still appears at the start of the body, strip it,
-    along with any leading punctuation/whitespace that joined them.
-    """
+    """Safety net: strip the title if it leaked into the body."""
     if not body:
         return body
     body = body.lstrip(_LEADING_BODY_NOISE)
@@ -183,15 +231,116 @@ def _strip_title_from_body(body, title):
     return body
 
 
-# ── Algorithm 1: PlainTextRankSummarizer ──────────────────────────────────────
+# ── Multilingual language support ─────────────────────────────────────────────
+
+# ISO 639-1 → (punkt_language, stopwords_language).
+# - punkt_language=None: use the multilingual regex sentence splitter.
+# - stopwords_language=None: no stopword filtering (algorithm still works).
+_LANGUAGE_MAP = {
+    "en": ("english", "english"),
+    "es": ("spanish", "spanish"),
+    "fr": ("french", "french"),
+    "de": ("german", "german"),
+    "it": ("italian", "italian"),
+    "pt": ("portuguese", "portuguese"),
+    "nl": ("dutch", "dutch"),
+    "ru": ("russian", "russian"),
+    "sv": ("swedish", "swedish"),
+    "no": ("norwegian", "norwegian"),
+    "da": ("danish", "danish"),
+    "fi": ("finnish", "finnish"),
+    "tr": ("turkish", "turkish"),
+    "el": ("greek", "greek"),
+    "pl": ("polish", None),
+    "cs": ("czech", None),
+    "et": ("estonian", None),
+    "sl": ("slovene", "slovene"),
+    "hi": (None, "hindi"),
+    "bn": (None, "bengali"),
+    "ar": (None, "arabic"),
+    "ne": (None, "nepali"),
+    "id": (None, "indonesian"),
+    "he": (None, "hebrew"),
+    "ro": (None, "romanian"),
+    "hu": (None, "hungarian"),
+    "ca": (None, "catalan"),
+    "zh-cn": (None, "chinese"),
+    "zh-tw": (None, "chinese"),
+}
+
+_NO_SPACE_LANGUAGES = {"zh-cn", "zh-tw", "ja", "th", "km", "lo", "my"}
+
+# Sentence terminators across major writing systems.
+_MULTILINGUAL_SENTENCE_END = re.compile(r"(?<=[.!?।。!?؟።။])\s+")
+
+
+def _fallback_sentence_split(text):
+    """Generic regex sentence splitter for languages without Punkt models."""
+    if not text:
+        return []
+    raw = _MULTILINGUAL_SENTENCE_END.split(text.strip())
+    return [s.strip() for s in raw if s.strip()]
+
+
+# ── Stopwords ─────────────────────────────────────────────────────────────────
+
+_ENGLISH_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
+    "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
+    "this", "that", "these", "those", "it", "its", "they", "them",
+    "i", "you", "he", "she", "we", "us", "him", "her", "their", "our",
+    "not", "no", "so", "if", "then", "than", "also", "just", "only",
+    "will", "would", "should", "could", "may", "might", "can", "shall",
+    "about", "into", "out", "up", "down", "over", "under", "again",
+    "any", "all", "some", "such", "what", "which", "who", "whom",
+    "when", "where", "why", "how", "there", "here", "more", "most",
+    "very", "much", "many", "one", "two", "said", "says", "say",
+})
+
+# Lazy cache: nltk_language_name -> frozenset of stopwords.
+_STOPWORD_CACHE = {"english": _ENGLISH_STOPWORDS}
+
+
+def _get_stopwords(nltk_language):
+    """Return a frozenset of stopwords for the given language, or empty set."""
+    if nltk_language is None:
+        return frozenset()
+    if nltk_language in _STOPWORD_CACHE:
+        return _STOPWORD_CACHE[nltk_language]
+    try:
+        from nltk.corpus import stopwords
+        words = frozenset(stopwords.words(nltk_language))
+        _STOPWORD_CACHE[nltk_language] = words
+        return words
+    except Exception:
+        _STOPWORD_CACHE[nltk_language] = frozenset()
+        return _STOPWORD_CACHE[nltk_language]
+
+
+def _detect_language(text):
+    """
+    Detect language and map to (iso_code, punkt_lang, stopwords_lang).
+    Falls back to English on detection failure.
+    """
+    sample = (text or "")[:2000].strip()
+    if len(sample) < 50:
+        return "en", "english", "english"
+    try:
+        iso = detect(sample)
+    except LangDetectException:
+        return "en", "english", "english"
+
+    punkt_lang, stopwords_lang = _LANGUAGE_MAP.get(iso, (None, None))
+    return iso, punkt_lang, stopwords_lang
+
+
+# ── Algorithm 1: PlainTextRankSummarizer (multilingual + MMR) ─────────────────
 
 class PlainTextRankSummarizer:
-    """
-    Plain TextRank implementation with constants-only tuning.
-    Faithful port of the production summarizer — no behavioral changes.
-    """
+    """TextRank with NLTK preprocessing, MMR diversity selection, position bias, and multilingual support."""
 
-    VERSION = "plain-textrank-v1"
+    VERSION = "plain-textrank-v3-multilingual"
 
     def __init__(
         self,
@@ -199,9 +348,11 @@ class PlainTextRankSummarizer:
         damping=0.85,
         max_iterations=40,
         min_delta=1e-4,
-        sentence_limit=3,
+        sentence_limit=6,
         min_sentence_words=5,
-        max_summary_chars=600,
+        max_summary_chars=700,
+        mmr_lambda=0.50,
+        position_boost=(1.5, 1.3, 1.15),
     ):
         self.damping = damping
         self.max_iterations = max_iterations
@@ -209,38 +360,107 @@ class PlainTextRankSummarizer:
         self.sentence_limit = sentence_limit
         self.min_sentence_words = min_sentence_words
         self.max_summary_chars = max_summary_chars
+        self.mmr_lambda = mmr_lambda
+        self.position_boost = position_boost
 
     def summarize(self, text):
-        sentences = self._split_sentences(text)
+        iso, punkt_lang, stopwords_lang = _detect_language(text)
+        stopwords_set = _get_stopwords(stopwords_lang)
+
+        sentences = self._split_sentences(text, iso, punkt_lang)
         if not sentences:
             return ""
         if len(sentences) == 1:
             return sentences[0][: self.max_summary_chars].strip()
 
-        tokens = [self._tokenize(sentence) for sentence in sentences]
+        tokens = [self._tokenize(s, stopwords_set) for s in sentences]
         graph = self._build_similarity_matrix(tokens)
         ranks = self._page_rank(graph)
-        ranked_indices = sorted(range(len(sentences)), key=lambda idx: ranks[idx], reverse=True)
-        selected = sorted(ranked_indices[: self.sentence_limit])
 
-        summary = " ".join(sentences[idx] for idx in selected).strip()
-        if len(summary) <= self.max_summary_chars:
-            return summary
-        return summary[: self.max_summary_chars].rsplit(" ", 1)[0].strip()
+        # Position bias: news ledes carry the core facts.
+        for i in range(min(len(self.position_boost), len(ranks))):
+            ranks[i] *= self.position_boost[i]
 
-    def _split_sentences(self, text):
+        # MMR selection: balances rank against diversity from already-chosen sentences.
+        selected_indices = self._mmr_select(ranks, graph)
+
+        # Restore document order for readability.
+        selected_indices.sort()
+        selected_sentences = [sentences[idx] for idx in selected_indices]
+        return self._truncate(selected_sentences)
+
+    def _mmr_select(self, ranks, sim_matrix):
+        """Greedy Maximal Marginal Relevance selection."""
+        n = len(ranks)
+        if n == 0:
+            return []
+        if self.sentence_limit >= n:
+            return list(range(n))
+
+        first = max(range(n), key=lambda i: ranks[i])
+        selected = [first]
+        remaining = set(range(n)) - {first}
+
+        while remaining and len(selected) < self.sentence_limit:
+            def mmr_score(i):
+                relevance = ranks[i]
+                max_sim = max(sim_matrix[i][j] for j in selected)
+                return self.mmr_lambda * relevance - (1.0 - self.mmr_lambda) * max_sim
+
+            best = max(remaining, key=mmr_score)
+            selected.append(best)
+            remaining.remove(best)
+
+        return selected
+
+    def _truncate(self, sentences):
+        parts = []
+        used = 0
+        for sent in sentences:
+            add_len = len(sent) + (1 if parts else 0)
+            if used + add_len <= self.max_summary_chars:
+                parts.append(sent)
+                used += add_len
+
+        if parts:
+            return " ".join(parts).strip()
+        if sentences:
+            return min(sentences, key=len).strip()
+        return ""
+
+    def _split_sentences(self, text, iso, punkt_lang):
         if not text:
             return []
-        raw = re.split(r"(?<=[.!?])\s+", text.strip())
-        sentences = []
-        for sentence in raw:
-            normalized = re.sub(r"\s+", " ", sentence).strip()
-            if len(normalized.split()) >= self.min_sentence_words:
-                sentences.append(normalized)
-        return sentences
 
-    def _tokenize(self, sentence):
-        return [tok for tok in re.findall(r"[A-Za-z0-9']+", sentence.lower()) if tok]
+        if punkt_lang is not None:
+            try:
+                raw = nltk.sent_tokenize(text.strip(), language=punkt_lang)
+            except LookupError:
+                raw = _fallback_sentence_split(text)
+        else:
+            raw = _fallback_sentence_split(text)
+
+        out = []
+        for sent in raw:
+            normalized = re.sub(r"\s+", " ", sent).strip()
+            if self._passes_length_filter(normalized, iso):
+                out.append(normalized)
+        return out
+
+    def _passes_length_filter(self, sentence, iso):
+        if iso in _NO_SPACE_LANGUAGES:
+            return len(sentence) >= self.min_sentence_words * 5
+        return len(sentence.split()) >= self.min_sentence_words
+
+    def _tokenize(self, sentence, stopwords_set):
+        text = sentence.lower().replace("\u2019", "'").replace("\u2018", "'")
+        raw = re.findall(r"\w+(?:[-'.]\w+)*", text, flags=re.UNICODE)
+        cleaned = []
+        for tok in raw:
+            tok = tok.strip("'-.")
+            if tok and tok not in stopwords_set:
+                cleaned.append(tok)
+        return cleaned
 
     def _build_similarity_matrix(self, tokenized_sentences):
         count = len(tokenized_sentences)
@@ -291,23 +511,8 @@ class PlainTextRankSummarizer:
 
 # ── Algorithm 2: NltkTextRankSummarizer ───────────────────────────────────────
 
-_ENGLISH_STOPWORDS = frozenset({
-    "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
-    "be", "been", "being", "have", "has", "had", "do", "does", "did",
-    "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
-    "this", "that", "these", "those", "it", "its", "they", "them",
-    "i", "you", "he", "she", "we", "us", "him", "her", "their", "our",
-    "not", "no", "so", "if", "then", "than", "also", "just", "only",
-    "will", "would", "should", "could", "may", "might", "can", "shall",
-    "about", "into", "out", "up", "down", "over", "under", "again",
-    "any", "all", "some", "such", "what", "which", "who", "whom",
-    "when", "where", "why", "how", "there", "here", "more", "most",
-    "very", "much", "many", "one", "two", "said", "says", "say",
-})
-
-
 class NltkTextRankSummarizer:
-    """TextRank with NLTK sentence splitting, hyphen-aware tokenizer, stopword filter."""
+    """TextRank with NLTK sentence splitting, hyphen-aware tokenizer, English stopwords."""
 
     VERSION = "nltk-textrank-v1"
 
@@ -332,29 +537,24 @@ class NltkTextRankSummarizer:
         sentences = self._split_sentences(text)
         if not sentences:
             return ""
-        
-        # Use _truncate here too instead of [: self.max_summary_chars]
         if len(sentences) == 1:
             return self._truncate(sentences)
 
         tokens = [self._tokenize(s) for s in sentences]
         valid_indices = [i for i, t in enumerate(tokens) if t]
-        
+
         if len(valid_indices) <= 1:
-            # FIX: Pass the slice as a list, don't join it yet
             return self._truncate(sentences[: self.sentence_limit])
 
         valid_tokens = [tokens[i] for i in valid_indices]
         graph = self._build_similarity_matrix(valid_tokens)
         ranks = self._page_rank(graph)
-        
+
         ranked_pairs = sorted(zip(valid_indices, ranks), key=lambda p: p[1], reverse=True)
         chosen_indices = sorted(idx for idx, _ in ranked_pairs[: self.sentence_limit])
-        
-        # FIX: Pass the list of sentences
+
         selected_sentences = [sentences[idx] for idx in chosen_indices]
         return self._truncate(selected_sentences)
-    
 
     def _truncate(self, sentences):
         parts = []
@@ -440,7 +640,7 @@ class NltkTextRankSummarizer:
 # ── Algorithm 3: MiniLmTextRankSummarizer ─────────────────────────────────────
 
 _MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-_LOCAL_MODELS_DIR = Path(os.environ.get("LOCAL_MODELS_DIR", str(DEFAULT_LOCAL_MODELS)))
+_LOCAL_MODELS_DIR = Path(os.environ.get("LOCAL_MODELS_DIR", str(_DEFAULT_LOCAL_MODELS)))
 _LOCAL_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -456,12 +656,10 @@ def _get_minilm_model():
 
     local_path = _LOCAL_MODELS_DIR / "all-MiniLM-L6-v2"
 
-    # Cached snapshot: load from disk.
     if local_path.exists() and any(local_path.iterdir()):
         logger.info("Loading MiniLM from local snapshot at %s", local_path)
         return SentenceTransformer(str(local_path), device="cpu")
 
-    # No snapshot yet: download then save for next time.
     logger.warning(
         "No local MiniLM snapshot at %s; downloading %s from HuggingFace hub "
         "and saving to local snapshot for future runs.",
@@ -513,8 +711,7 @@ class MiniLmTextRankSummarizer:
         ranks = self._page_rank(graph)
         ranked_indices = sorted(range(len(sentences)), key=lambda idx: ranks[idx], reverse=True)
         selected_indices = sorted(ranked_indices[:self.sentence_limit])
-        
-        # FIX: Use the helper method here too
+
         selected_sentences = [sentences[i] for i in selected_indices]
         return self._truncate(selected_sentences)
 
@@ -532,7 +729,6 @@ class MiniLmTextRankSummarizer:
         if sentences:
             return min(sentences, key=len).strip()
         return ""
-    
 
     def _split_sentences(self, text):
         if not text:
@@ -583,7 +779,7 @@ class MiniLmTextRankSummarizer:
 # ── Algorithm registry ────────────────────────────────────────────────────────
 
 ALGORITHMS = {
-    "Plain TextRank (original)": PlainTextRankSummarizer,
+    "Plain TextRank (multilingual + MMR)": PlainTextRankSummarizer,
     "NLTK TextRank (Punkt + stopwords)": NltkTextRankSummarizer,
     "MiniLM TextRank (semantic embeddings)": MiniLmTextRankSummarizer,
 }
@@ -646,8 +842,8 @@ with st.sidebar:
     st.subheader("Algorithms to run")
 
     selected_algorithms = []
-    if st.checkbox("Plain TextRank (original)", value=True, key="alg_plain"):
-        selected_algorithms.append("Plain TextRank (original)")
+    if st.checkbox("Plain TextRank (multilingual + MMR)", value=True, key="alg_plain"):
+        selected_algorithms.append("Plain TextRank (multilingual + MMR)")
     if st.checkbox("NLTK TextRank (Punkt + stopwords)", value=True, key="alg_nltk"):
         selected_algorithms.append("NLTK TextRank (Punkt + stopwords)")
     if st.checkbox("MiniLM TextRank (semantic embeddings)", value=True, key="alg_minilm"):
@@ -657,7 +853,7 @@ with st.sidebar:
     st.subheader("Summarization Settings")
 
     sentence_limit = st.slider(
-        "Number of sentences", 2, 15, 5,
+        "Number of sentences", 2, 15, 6,
         help="How many sentences each summarizer should pick.",
     )
     min_sent_words = st.slider(
@@ -665,7 +861,7 @@ with st.sidebar:
         help="Sentences shorter than this are skipped during ranking.",
     )
     max_summary_chars = st.slider(
-        "Max summary length (chars)", 200, 2000, 600, step=50,
+        "Max summary length (chars)", 200, 2000, 700, step=50,
         help="Soft cap on the final summary length.",
     )
 
@@ -735,8 +931,15 @@ if "results" in st.session_state:
 
     if article_title:
         st.info(f"**Article title:** {article_title}")
+
+    # Show detected language alongside body stats.
+    try:
+        detected_iso, _, _ = _detect_language(body_text)
+    except Exception:
+        detected_iso = "?"
     st.caption(
         f"Body length: {len(body_text):,} chars / {len(body_text.split()):,} words. "
+        f"Detected language: `{detected_iso}`. "
         "Every algorithm receives this body (title excluded)."
     )
 
